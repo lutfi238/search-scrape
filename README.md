@@ -43,18 +43,48 @@
 Here are screenshots showing the MCP tools working in Vscode, Cursor, Trae:
 
 #### Search Web Tool
+
 ![Search Web Tool Screenshot](screenshot/search_web.png)
 [View the full sample output for this search interaction](sample-results/search_web.txt)
 
-#### Scrape URL Tool  
+#### Scrape URL Tool
+
 ![Scrape URL Tool Screenshot](screenshot/scrape_url.png)
 [View the full sample output for this scrape interaction](sample-results/scrape_url.txt)
 
 #### Research History Tool
+
 ![Research History Tool Screenshot](screenshot/history.png)
 [View the history sample output for this interaction](sample-results/history.txt)
 
 ## 🚀 Quick Start
+
+### Option 1: Docker-based MCP (Recommended)
+
+```bash
+# 1. Start all services
+docker-compose up -d
+
+# 2. Build MCP server image
+docker-compose build mcp-server
+
+# 3. Add to your AI assistant's MCP config (VS Code, Cursor, etc.):
+```
+
+```json
+{
+  "mcpServers": {
+    "search-scrape": {
+      "command": "/path/to/mcp-server/start-mcp.bat",
+      "args": []
+    }
+  }
+}
+```
+
+The `start-mcp.bat` script handles Docker networking, environment variables, and volume mounts automatically.
+
+### Option 2: Native Build
 
 ```bash
 # 1. Start SearXNG search engine (required)
@@ -67,15 +97,16 @@ docker-compose up qdrant -d
 cd mcp-server && cargo build --release
 
 # 4. Add to your AI assistant's MCP config:
+```
+
+```json
 {
   "mcpServers": {
     "search-scrape": {
       "command": "/path/to/mcp-server/target/release/search-scrape-mcp",
-      "env": { 
+      "env": {
         "SEARXNG_URL": "http://localhost:8888",
-        "SEARXNG_ENGINES": "google,bing,duckduckgo",
-        "QDRANT_URL": "http://localhost:6334",  // Optional: enables history (gRPC port)
-        "MAX_LINKS": "100"
+        "QDRANT_URL": "http://localhost:6334"
       }
     }
   }
@@ -84,19 +115,31 @@ cd mcp-server && cargo build --release
 
 ### Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SEARXNG_URL` | `http://localhost:8888` | SearXNG instance URL |
-| `QDRANT_URL` | - | **Optional**: Qdrant gRPC URL (e.g., `http://localhost:6334`). Enables research history feature. **Note**: Use gRPC port 6334, NOT HTTP port 6333 |
-| `SEARXNG_ENGINES` | `duckduckgo,google,bing` | Default search engines (comma-separated) |
-| `MAX_LINKS` | `100` | Max links to return in Sources section |
-| `MAX_CONTENT_CHARS` | `10000` | Default `max_chars` limit for scraped content (100-50000) |
-| `RUST_LOG` | - | Log level: `error`, `warn`, `info`, `debug`, `trace` |
+| Variable              | Default                  | Description                                                                                                                                       |
+| --------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SEARXNG_URL`         | `http://localhost:8888`  | SearXNG instance URL                                                                                                                              |
+| `QDRANT_URL`          | -                        | **Optional**: Qdrant gRPC URL (e.g., `http://localhost:6334`). Enables research history feature. **Note**: Use gRPC port 6334, NOT HTTP port 6333 |
+| `FASTEMBED_CACHE_DIR` | `.fastembed_cache`       | Directory for fastembed model cache (for research_history)                                                                                        |
+| `HF_HOME`             | `~/.cache/huggingface`   | HuggingFace hub cache directory for model downloads                                                                                               |
+| `SEARXNG_ENGINES`     | `duckduckgo,google,bing` | Default search engines (comma-separated)                                                                                                          |
+| `MAX_LINKS`           | `100`                    | Max links to return in Sources section                                                                                                            |
+| `MAX_CONTENT_CHARS`   | `10000`                  | Default `max_chars` limit for scraped content (100-50000)                                                                                         |
+| `RUST_LOG`            | -                        | Log level: `error`, `warn`, `info`, `debug`, `trace`                                                                                              |
+
+### Docker Configuration Files
+
+| File                       | Purpose                                          |
+| -------------------------- | ------------------------------------------------ |
+| `mcp-server/start-mcp.bat` | Docker run script for Windows MCP integration    |
+| `mcp-server/mcp.env`       | Environment variables passed to Docker container |
+| `mcp-server/model-cache/`  | Persistent cache for fastembed ONNX models       |
 
 ## � MCP Tools
 
 ### `search_web` - Advanced Web Search
+
 **Enhanced with full SearXNG parameter support:**
+
 - **engines**: `google`, `bing`, `duckduckgo`, etc.
 - **categories**: `general`, `news`, `it`, `science`, etc.
 - **language**: `en`, `es`, `fr`, `de`, etc.
@@ -117,14 +160,16 @@ cd mcp-server && cargo build --release
 ```
 
 **Agent-friendly extras:**
+
 - `max_results`: Limit how many ranked results you return to keep the response concise (1-100, default: 10)
 - The tool surfaces SearXNG `answers`, spelling `corrections`, `suggestions`, and a count of `unresponsive_engines` so agents know when to retry or refine the query
 
 **Enhanced Results (v2.0):**
 Each search result now includes:
+
 - `domain`: Extracted domain name (e.g., `"tokio.rs"`)
 - `source_type`: Automatic classification:
-  - `docs` - Official documentation (*.github.io, docs.rs, readthedocs.org)
+  - `docs` - Official documentation (\*.github.io, docs.rs, readthedocs.org)
   - `repo` - Code repositories (github.com, gitlab.com, bitbucket.org)
   - `blog` - Technical blogs (medium.com, dev.to, substack.com)
   - `video` - Video platforms (youtube.com, vimeo.com)
@@ -134,6 +179,7 @@ Each search result now includes:
   - `other` - General/unknown sites
 
 **Example**: Agents can now filter results programmatically:
+
 ```python
 # Get only documentation links
 docs = [r for r in results if r['source_type'] == 'docs']
@@ -143,7 +189,9 @@ trusted = [r for r in results if r['domain'] in ['rust-lang.org', 'tokio.rs']]
 ```
 
 ### `scrape_url` - Optimized Content Extraction
+
 **Intelligent scraping with advanced cleanup:**
+
 - ✅ **Smart Link Filtering**: Extracts links from main content (article/main tags) only
 - ✅ **Source Citations**: Returns `[1]`, `[2]` markers with full URL mapping in Sources section
 - ✅ **Noise Removal**: Automatically removes ads, navigation, footers, and boilerplate
@@ -159,19 +207,21 @@ trusted = [r for r in results if r['domain'] in ['rust-lang.org', 'tokio.rs']]
 - ✅ **Quality Scoring**: Automatic content quality assessment (0.0-1.0)
 
 **Parameters:**
+
 ```json
 {
   "url": "https://doc.rust-lang.org/book/ch01-00-getting-started.html",
-  "content_links_only": true,  // Optional: smart filter (default: true)
-  "max_links": 100,            // Optional: limit sources (default: 100, max: 500)
-  "max_chars": 10000,          // Optional: cap preview length (default: 10000, max: 50000)
-  "output_format": "text"      // Optional: "text" (default) or "json"
+  "content_links_only": true, // Optional: smart filter (default: true)
+  "max_links": 100, // Optional: limit sources (default: 100, max: 500)
+  "max_chars": 10000, // Optional: cap preview length (default: 10000, max: 50000)
+  "output_format": "text" // Optional: "text" (default) or "json"
 }
 ```
 
 `max_chars` keeps scraped previews within token budgets; override the default for the entire server with the `MAX_CONTENT_CHARS` env var (100-50000).
 
 **Text Output (Default):**
+
 ```markdown
 **Getting Started - The Rust Programming Language**
 
@@ -192,6 +242,7 @@ Learn more about [Cargo][1] and the [installation process][2].
 
 **JSON Output (New in v2.0):**
 Set `output_format: "json"` to get structured data:
+
 ```json
 {
   "url": "https://example.com/article",
@@ -218,19 +269,16 @@ Set `output_format: "json"` to get structured data:
   "warnings": [],
   "domain": "example.com",
   "headings": [
-    {"level": "h1", "text": "Main Title"},
-    {"level": "h2", "text": "Section"}
+    { "level": "h1", "text": "Main Title" },
+    { "level": "h2", "text": "Section" }
   ],
-  "links": [
-    {"url": "https://...", "text": "Link text"}
-  ],
-  "images": [
-    {"src": "https://...", "alt": "Image alt", "title": ""}
-  ]
+  "links": [{ "url": "https://...", "text": "Link text" }],
+  "images": [{ "src": "https://...", "alt": "Image alt", "title": "" }]
 }
 ```
 
 **Key JSON Fields:**
+
 - `code_blocks`: Extracted code with language detection (e.g., `rust`, `python`, `javascript`)
 - `extraction_score`: Quality assessment (0.0-1.0) based on content richness
 - `truncated`: Boolean flag indicating if content was cut off
@@ -242,6 +290,7 @@ Set `output_format: "json"` to get structured data:
 **100% Open Source Memory System**: Track and search your research history using local embeddings and Qdrant vector database. Perfect for avoiding duplicate work and maintaining context across sessions.
 
 **Features:**
+
 - 🧠 **Semantic Search**: Find related searches/scrapes even with different wording
 - 🔒 **100% Local**: No external API calls - uses fastembed for embeddings
 - 📊 **Auto-Logging**: All searches and scrapes are automatically saved with full context
@@ -253,6 +302,7 @@ Set `output_format: "json"` to get structured data:
 - ⚙️ **Optional**: Only enabled when `QDRANT_URL` is set
 
 **Setup:**
+
 ```bash
 # 1. Start Qdrant vector database (gRPC port 6334)
 docker-compose up qdrant -d
@@ -264,21 +314,24 @@ QDRANT_URL=http://localhost:6334 \
 ```
 
 **Parameters:**
+
 ```json
 {
-  "query": "rust async web scraping",  // Natural language query
-  "limit": 10,                         // Max results (default: 10)
-  "threshold": 0.7,                    // Similarity 0-1 (default: 0.7)
-  "entry_type": "search"               // Optional: "search" or "scrape" or omit for both
+  "query": "rust async web scraping", // Natural language query
+  "limit": 10, // Max results (default: 10)
+  "threshold": 0.7, // Similarity 0-1 (default: 0.7)
+  "entry_type": "search" // Optional: "search" or "scrape" or omit for both
 }
 ```
 
 **Threshold Guide:**
+
 - `0.6-0.7`: Broad topic search (e.g., "async programming" finds "tokio", "futures")
 - `0.75-0.85`: Specific queries (e.g., "web scraping" finds "HTML parsing", "requests")
 - `0.9+`: Near-exact matches
 
 **Example Output:**
+
 ```
 Found 5 relevant entries for 'rust async web scraping':
 
@@ -298,6 +351,7 @@ Found 5 relevant entries for 'rust async web scraping':
 ```
 
 **Filtering by Type:**
+
 ```json
 // Find only past searches
 {"query": "rust tutorials", "entry_type": "search", "threshold": 0.75}
@@ -310,6 +364,7 @@ Found 5 relevant entries for 'rust async web scraping':
 ```
 
 **Technical Details:**
+
 - **Search Algorithm**: **Hybrid Search** (Vector + Keyword Boosting) for BEST agent results
   - Vector embeddings find semantically similar content
   - Keyword matching boosts exact term matches (+15% score)
@@ -326,6 +381,7 @@ Found 5 relevant entries for 'rust async web scraping':
 ## 🛠️ Development
 
 ### HTTP API Testing
+
 ```bash
 # Test search with parameters
 curl -X POST "http://localhost:5000/search" \
@@ -339,6 +395,7 @@ curl -X POST "http://localhost:5000/scrape" \
 ```
 
 ### Running the Server
+
 ```bash
 # HTTP server (port 5000)
 cd mcp-server
@@ -354,6 +411,7 @@ RUST_LOG=debug SEARXNG_URL=http://localhost:8888 cargo run --release
 ### Performance Tuning
 
 **Cache Settings** (in `src/main.rs` and `src/stdio_service.rs`):
+
 ```rust
 search_cache: 10_000 entries, 10 min TTL
 scrape_cache: 10_000 entries, 30 min TTL
@@ -361,6 +419,7 @@ outbound_limit: 32 concurrent requests
 ```
 
 **Optimization Tips:**
+
 - Use `content_links_only: true` to reduce noise (enabled by default)
 - Set `max_links` lower (e.g., 20-50) for faster responses
 - Use `SEARXNG_ENGINES` env var to limit search engines
@@ -373,7 +432,7 @@ outbound_limit: 32 concurrent requests
 │   ├── src/
 │   │   ├── main.rs       # HTTP server entry point
 │   │   ├── stdio_service.rs  # MCP stdio server (for AI assistants)
-│   │   ├── search.rs     # SearXNG integration with full parameter support  
+│   │   ├── search.rs     # SearXNG integration with full parameter support
 │   │   ├── scrape.rs     # Scraping orchestration with caching & retry
 │   │   ├── rust_scraper.rs   # Advanced extraction, noise filtering, smart links
 │   │   ├── mcp.rs        # MCP HTTP endpoints
@@ -393,6 +452,7 @@ outbound_limit: 32 concurrent requests
 **The tool descriptions already contain this guidance**, but here's a quick reference:
 
 #### research_history Smart Usage (🆕 v3.5)
+
 - **Always check history FIRST** before doing new searches/scrapes:
   - Saves API calls and bandwidth
   - Maintains context across sessions
@@ -416,6 +476,7 @@ outbound_limit: 32 concurrent requests
   4. If not found, use `scrape_url` (auto-logs to history)
 
 #### search_web Smart Usage
+
 - **Always set `max_results`** based on your task:
   - Quick fact-check? → `max_results: 5-10`
   - Balanced research? → `max_results: 15-25`
@@ -434,6 +495,7 @@ outbound_limit: 32 concurrent requests
   - If `unresponsive_engines > 3`, consider retrying the query
 
 #### scrape_url Smart Usage
+
 - **Always adjust `max_chars`** based on your need:
   - Quick summary? → `max_chars: 3000-5000`
   - Standard article? → `max_chars: 10000` (default)
@@ -447,6 +509,7 @@ outbound_limit: 32 concurrent requests
 - **Lower `max_links`** for faster responses when you don't need all sources
 
 ### For AI Assistants
+
 - **Use smart filtering**: Keep `content_links_only: true` (default) to avoid nav/footer links
 - **Limit result counts**: Dial back `max_results` to 5-20 when agents only need the top snippets
 - **Cap preview length**: Use `max_chars` (or `MAX_CONTENT_CHARS`) to prevent huge scrape responses from draining tokens
@@ -455,6 +518,7 @@ outbound_limit: 32 concurrent requests
 - **Search first, scrape second**: Use `search_web` to find URLs, then `scrape_url` for deep content
 
 ### For Developers
+
 - **Cache effectively**: Search results cached 10min, scrapes cached 30min
 - **Handle errors gracefully**: Retry logic built-in (exponential backoff)
 - **Monitor performance**: Use `RUST_LOG=info` to track cache hits and timing
@@ -462,6 +526,7 @@ outbound_limit: 32 concurrent requests
 - **Rate limiting**: Built-in semaphore (32 concurrent) prevents overwhelming targets
 
 ### For Content Extraction
+
 - **Documentation sites work great**: mdBook, GitBook auto-detected
 - **JavaScript-heavy sites**: May have limited content (no JS execution)
 - **Prefer canonical URLs**: Tool extracts canonical link when available
@@ -470,29 +535,54 @@ outbound_limit: 32 concurrent requests
 ## 🔧 Troubleshooting
 
 **SearXNG not responding:**
+
 ```bash
 docker-compose restart searxng
 # Check logs: docker-compose logs searxng
 ```
 
 **Empty scrape results:**
+
 - Site may be JavaScript-heavy (we don't execute JS)
 - Try the URL in a browser to verify content is in HTML
 - Check logs with `RUST_LOG=debug` for detailed extraction info
 
 **Too many/too few links:**
+
 - Adjust `max_links` parameter (default: 100, max: 500)
 - Use `content_links_only: false` to get all document links
 - Use `content_links_only: true` for main content only (default)
 
 **Slow responses:**
+
 - Check cache hit rates with `RUST_LOG=info`
 - Verify SearXNG is running: `curl http://localhost:8888`
 - Reduce concurrent load (outbound_limit in source)
 
+**research_history not working (Failed to initialize embedding model):**
+
+This error means fastembed can't download or find the ONNX model. Common causes:
+
+1. **Wrong environment variable name**: Use `FASTEMBED_CACHE_DIR` (not `_PATH`)
+2. **Missing HF_HOME**: Set `HF_HOME` for HuggingFace model downloads
+3. **Docker container issue**: Ensure `mcp.env` file has correct env vars:
+   ```
+   FASTEMBED_CACHE_DIR=/home/appuser/.cache/fastembed
+   HF_HOME=/home/appuser/.cache/huggingface
+   ```
+4. **Check Qdrant is running**: `docker-compose up qdrant -d`
+5. **Verify connection**: `curl http://localhost:6333/collections`
+
+**Model download fails in Docker:**
+
+- Ensure home directory exists for appuser (check Dockerfile has `-m -d /home/appuser`)
+- Use volume mount for persistent cache: `-v model-cache:/home/appuser/.cache/fastembed`
+- Check network connectivity: `docker exec <container> curl -I https://huggingface.co`
+
 ## 🤝 Contributing
 
 Contributions welcome! Areas for improvement:
+
 - Additional search engines in SearXNG config
 - JavaScript execution support (headless browser)
 - PDF/document extraction
