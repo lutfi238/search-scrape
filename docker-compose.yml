@@ -26,6 +26,21 @@ services:
       - QDRANT__SERVICE__GRPC_PORT=6334
     restart: unless-stopped
 
+  mcp-server:
+    build: 
+      context: ./mcp-server
+    image: search-scrape-mcp:latest
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+      - QDRANT_URL=http://qdrant:6334
+      - FASTEMBED_CACHE_PATH=/home/appuser/.cache/fastembed
+    depends_on:
+      - searxng
+      - qdrant
+    networks:
+      - default
+
+
 volumes:
   qdrant_storage:
     driver: local

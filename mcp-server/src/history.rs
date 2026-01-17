@@ -91,12 +91,23 @@ impl MemoryManager {
         self.embedding_model
             .get_or_try_init(|| async {
                 tracing::info!("Initializing fastembed model...");
-                let model = TextEmbedding::try_new(
+                tracing::info!("HOME dir: {:?}", std::env::var("HOME"));
+                tracing::info!("Cache dir: {:?}", std::env::var("HF_HOME"));
+                
+                match TextEmbedding::try_new(
                     InitOptions::new(EmbeddingModel::AllMiniLML6V2)
                         .with_show_download_progress(true)
-                )
-                .context("Failed to initialize embedding model")?;
-                Ok(model)
+                ) {
+                    Ok(model) => {
+                        tracing::info!("Fastembed model initialized successfully!");
+                        Ok(model)
+                    }
+                    Err(e) => {
+                        tracing::error!("Fastembed initialization failed: {:?}", e);
+                        tracing::error!("Error details: {}", e);
+                        Err(anyhow::anyhow!("Failed to initialize embedding model: {}", e))
+                    }
+                }
             })
             .await
     }

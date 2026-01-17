@@ -15,3 +15,4 @@ scrapy-service/webspider/.scrapy/
 *.pid
 .DS_Store
 .fastembed_cache/
+CLAUDE.md

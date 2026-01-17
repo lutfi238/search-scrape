@@ -4,9 +4,11 @@ use anyhow::{anyhow, Result};
 use backoff::future::retry;
 use backoff::ExponentialBackoffBuilder;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::info;
 use select::predicate::Predicate;
 use crate::rust_scraper::RustScraper;
+use futures::stream::{self, StreamExt};
 
 pub async fn scrape_url(state: &Arc<AppState>, url: &str) -> Result<ScrapeResponse> {
     info!("Scraping URL: {}", url);
@@ -211,6 +213,88 @@ pub async fn scrape_url_fallback(state: &Arc<AppState>, url: &str) -> Result<Scr
     
     info!("Fallback scraper extracted {} words", result.word_count);
     Ok(result)
+}
+
+/// Scrape multiple URLs concurrently with configurable parallelism
+/// Returns results for all URLs, including failures
+pub async fn scrape_batch(
+    state: &Arc<AppState>,
+    urls: Vec<String>,
+    max_concurrent: Option<usize>,
+    max_chars: Option<usize>,
+) -> Result<ScrapeBatchResponse> {
+    let start_time = Instant::now();
+    let total = urls.len();
+
+    // Default to 10 concurrent, max 50 to avoid overwhelming
+    let concurrency = max_concurrent.unwrap_or(10).min(50);
+    let max_chars = max_chars.unwrap_or(10000);
+
+    info!("Starting batch scrape of {} URLs with concurrency {}", total, concurrency);
+
+    // Process URLs concurrently using buffered stream
+    let state_clone = Arc::clone(state);
+    let results: Vec<ScrapeBatchResult> = stream::iter(urls)
+        .map(|url| {
+            let state = Arc::clone(&state_clone);
+            let url_clone = url.clone();
+            async move {
+                let url_start = Instant::now();
+
+                match scrape_url(&state, &url_clone).await {
+                    Ok(mut data) => {
+                        // Apply max_chars truncation
+                        data.actual_chars = data.clean_content.len();
+                        data.max_chars_limit = Some(max_chars);
+                        data.truncated = data.clean_content.len() > max_chars;
+
+                        if data.truncated {
+                            data.clean_content = data.clean_content.chars().take(max_chars).collect();
+                            if !data.warnings.contains(&"content_truncated".to_string()) {
+                                data.warnings.push("content_truncated".to_string());
+                            }
+                        }
+
+                        ScrapeBatchResult {
+                            url: url_clone,
+                            success: true,
+                            data: Some(data),
+                            error: None,
+                            duration_ms: url_start.elapsed().as_millis() as u64,
+                        }
+                    }
+                    Err(e) => {
+                        ScrapeBatchResult {
+                            url: url_clone,
+                            success: false,
+                            data: None,
+                            error: Some(e.to_string()),
+                            duration_ms: url_start.elapsed().as_millis() as u64,
+                        }
+                    }
+                }
+            }
+        })
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+
+    let successful = results.iter().filter(|r| r.success).count();
+    let failed = results.iter().filter(|r| !r.success).count();
+    let total_duration_ms = start_time.elapsed().as_millis() as u64;
+
+    info!(
+        "Batch scrape completed: {}/{} successful, {} failed, {}ms total",
+        successful, total, failed, total_duration_ms
+    );
+
+    Ok(ScrapeBatchResponse {
+        total,
+        successful,
+        failed,
+        total_duration_ms,
+        results,
+    })
 }
 
 #[cfg(test)]

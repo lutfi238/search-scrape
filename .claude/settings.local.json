@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(docker-compose build:*)",
+      "Bash(del \"d:\\\\Project_Gabut\\\\search-scrape\\\\mcp-server\\\\src\\\\browser.rs\")",
+      "Bash(docker compose build:*)"
+    ]
+  }
+}

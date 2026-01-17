@@ -1,0 +1,9 @@
+{
+  "mcp.servers": {
+    "search-scrape": {
+      "command": "d:/Project_Gabut/search-scrape/mcp-server/start-mcp.bat",
+      "args": [],
+      "env": {}
+    }
+  }
+}

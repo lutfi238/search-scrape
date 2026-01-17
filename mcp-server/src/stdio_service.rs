@@ -3,7 +3,7 @@ use std::env;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 use std::borrow::Cow;
-use crate::{search, scrape, AppState, history};
+use crate::{search, scrape, crawl, extract, research, AppState, history};
 
 #[derive(Clone, Debug)]
 pub struct McpService {
@@ -13,6 +13,7 @@ pub struct McpService {
 impl McpService {
     pub async fn new() -> anyhow::Result<Self> {
         tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .init();
 
@@ -166,6 +167,224 @@ impl rmcp::ServerHandler for McpService {
                             "type": "string",
                             "description": "Filter by entry type. Use 'search' for past web searches, 'scrape' for scraped pages. Omit to search both types.",
                             "enum": ["search", "scrape"]
+                        }
+                    },
+                    "required": ["query"]
+                }) {
+                    serde_json::Value::Object(map) => std::sync::Arc::new(map),
+                    _ => std::sync::Arc::new(serde_json::Map::new()),
+                },
+                output_schema: None,
+                annotations: None,
+            },
+            Tool {
+                name: Cow::Borrowed("scrape_batch"),
+                description: Some(Cow::Borrowed("Scrape multiple URLs concurrently in a single request. Ideal for bulk content extraction from search results or link lists.\n\nKEY FEATURES:\n• Concurrent scraping with configurable parallelism (default: 10, max: 50)\n• Returns success/failure status for each URL with timing info\n• Automatic retry logic and error handling per URL\n• Same quality extraction as scrape_url (code blocks, metadata, etc.)\n• Efficient: Uses connection pooling and caching\n\nAGENT BEST PRACTICES:\n1. Use after search_web to scrape top results in one call\n2. Set max_concurrent=5-10 for stability, increase to 20-30 for speed\n3. Keep max_chars=3000-5000 per URL to manage total response size\n4. Check 'failed' count in response - some URLs may be unreachable\n5. Use output_format='json' for programmatic processing\n6. For 50+ URLs, consider batching into multiple calls\n\nPERFORMANCE:\n• 10 URLs @ concurrency 10: ~2-5 seconds\n• 50 URLs @ concurrency 20: ~5-15 seconds\n• Failed URLs don't block others")),
+                input_schema: match serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "urls": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of URLs to scrape. Maximum 100 URLs per request.",
+                            "minItems": 1,
+                            "maxItems": 100
+                        },
+                        "max_concurrent": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 50,
+                            "default": 10,
+                            "description": "Max concurrent requests. GUIDANCE: 5-10 for stability, 15-30 for speed, 50 max. Higher = faster but more resource intensive"
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "minimum": 100,
+                            "maximum": 50000,
+                            "default": 10000,
+                            "description": "Max content chars per URL. GUIDANCE: 3000-5000 for summaries, 10000 for articles. Lower values = smaller total response"
+                        },
+                        "output_format": {
+                            "type": "string",
+                            "enum": ["text", "json"],
+                            "default": "json",
+                            "description": "Output format. 'json' (default) returns structured data, 'text' returns formatted markdown summary"
+                        }
+                    },
+                    "required": ["urls"]
+                }) {
+                    serde_json::Value::Object(map) => std::sync::Arc::new(map),
+                    _ => std::sync::Arc::new(serde_json::Map::new()),
+                },
+                output_schema: None,
+                annotations: None,
+            },
+            Tool {
+                name: Cow::Borrowed("crawl_website"),
+                description: Some(Cow::Borrowed("Recursively crawl a website to discover and extract content from multiple pages. Ideal for documentation sites, blogs, or any multi-page content.\n\nKEY FEATURES:\n• BFS crawling with configurable depth (default: 3 levels)\n• Smart link filtering (same domain, exclude patterns)\n• Concurrent page processing for speed\n• Returns sitemap of all discovered URLs\n• Content preview for each page\n• Automatic deduplication of URLs\n\nAGENT BEST PRACTICES:\n1. Start with max_depth=2 and max_pages=20 for exploration\n2. Increase to max_depth=3-5 and max_pages=50-100 for comprehensive crawls\n3. Use include_patterns to focus on specific sections (e.g., ['/docs/', '/guide/'])\n4. Use exclude_patterns to skip unwanted content (e.g., ['/api/', '/changelog/'])\n5. Set same_domain_only=true (default) to avoid crawling external sites\n6. Check 'sitemap' in response for list of all discovered URLs\n\nPERFORMANCE:\n• 20 pages @ depth 2: ~10-20 seconds\n• 50 pages @ depth 3: ~30-60 seconds\n• Uses caching - repeated URLs are fast")),
+                input_schema: match serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "Starting URL to crawl. Should be the root or section root of the site you want to explore."
+                        },
+                        "max_depth": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 10,
+                            "default": 3,
+                            "description": "Maximum link depth to crawl. GUIDANCE: 1=start page only, 2=start+linked pages, 3=comprehensive (default), 5+=deep crawl. Higher = more pages but slower"
+                        },
+                        "max_pages": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 500,
+                            "default": 50,
+                            "description": "Maximum total pages to crawl. GUIDANCE: 10-20 for quick exploration, 50 (default) for standard sites, 100-200 for large docs, 500 max"
+                        },
+                        "max_concurrent": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 20,
+                            "default": 5,
+                            "description": "Concurrent page requests. GUIDANCE: 3-5 (default) for stability, 10-15 for speed on robust servers"
+                        },
+                        "same_domain_only": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Only crawl pages on the same domain (and subdomains). Set false to follow external links"
+                        },
+                        "include_patterns": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Only crawl URLs containing these patterns. Example: ['/docs/', '/tutorial/'] to focus on documentation"
+                        },
+                        "exclude_patterns": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Skip URLs containing these patterns. Default excludes common non-content paths (/login, /api/, .pdf, etc.)"
+                        },
+                        "max_chars_per_page": {
+                            "type": "integer",
+                            "minimum": 100,
+                            "maximum": 50000,
+                            "default": 5000,
+                            "description": "Max content chars per page in results. Lower = smaller response size"
+                        }
+                    },
+                    "required": ["url"]
+                }) {
+                    serde_json::Value::Object(map) => std::sync::Arc::new(map),
+                    _ => std::sync::Arc::new(serde_json::Map::new()),
+                },
+                output_schema: None,
+                annotations: None,
+            },
+            Tool {
+                name: Cow::Borrowed("extract_structured"),
+                description: Some(Cow::Borrowed("Extract structured JSON data from a webpage using schema definitions or natural language prompts. No external LLM required - uses intelligent pattern matching.\n\nKEY FEATURES:\n• Schema-based extraction: Define fields with names, types, and descriptions\n• Prompt-based extraction: Describe what you want in natural language\n• Auto-detection: Automatically finds emails, prices, dates, phones\n• Built-in patterns: Products, articles, contacts, code blocks\n• Metadata included: Title, author, publish date, word count\n\nEXTRACTION TYPES:\n• string: Text content\n• number: Numeric values\n• boolean: True/false\n• array: Lists of items\n• object: Nested structures\n\nBUILT-IN FIELDS (use these names for automatic extraction):\n• title, description, author, date, published\n• price, email, phone\n• links, headings, images, code_blocks\n\nUSE CASES:\n• Product pages: Extract name, price, description, images\n• Articles: Extract title, author, date, content summary\n• Contact pages: Extract emails, phones, addresses\n• Documentation: Extract headings, code examples")),
+                input_schema: match serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "URL to extract data from"
+                        },
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string", "description": "Field name for the extracted data"},
+                                    "description": {"type": "string", "description": "What this field should contain"},
+                                    "field_type": {"type": "string", "enum": ["string", "number", "boolean", "array", "object"]},
+                                    "required": {"type": "boolean"}
+                                },
+                                "required": ["name", "description"]
+                            },
+                            "description": "Schema defining fields to extract. Each field has name, description, optional type and required flag"
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Natural language description of what to extract. Example: 'Extract product information including name, price, and features' or 'Find all contact information'"
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "minimum": 100,
+                            "maximum": 50000,
+                            "default": 10000,
+                            "description": "Max chars of raw content to include in response"
+                        }
+                    },
+                    "required": ["url"]
+                }) {
+                    serde_json::Value::Object(map) => std::sync::Arc::new(map),
+                    _ => std::sync::Arc::new(serde_json::Map::new()),
+                },
+                output_schema: None,
+                annotations: None,
+            },
+            Tool {
+                name: Cow::Borrowed("deep_research"),
+                description: Some(Cow::Borrowed("Perform deep research on a topic by combining search, crawl, and analysis. Ideal for comprehensive understanding of complex topics.\n\nWORKFLOW:\n1. Search the web for relevant pages on the topic\n2. Scrape top search results for full content\n3. Optionally crawl linked pages for more depth\n4. Analyze and summarize all gathered information\n5. Extract topics, key findings, and related queries\n\nKEY FEATURES:\n• Multi-source aggregation from search results\n• Automatic source type classification (docs, repo, blog, Q&A, news)\n• Topic clustering from headings across sources\n• Relevance scoring based on content quality\n• Code block detection and counting\n• Related query suggestions for follow-up research\n\nAGENT BEST PRACTICES:\n1. Use for complex topics requiring multiple sources\n2. Start with max_search_results=10, increase for broader coverage\n3. Set crawl_depth=0 for quick research, 2 for comprehensive\n4. Use include_domains to focus on trusted sources\n5. Use exclude_domains to skip low-quality sites\n6. Check 'key_findings' for quick insights\n7. Use 'related_queries' for follow-up research\n\nPERFORMANCE:\n• 10 sources, no crawl: ~10-30 seconds\n• 10 sources, crawl depth 2: ~30-90 seconds\n• Results are cached for repeated queries")),
+                input_schema: match serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Research topic or question. Be specific for better results. Example: 'How to implement authentication in Next.js 14'"
+                        },
+                        "max_search_results": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 30,
+                            "default": 10,
+                            "description": "Number of search results to analyze. GUIDANCE: 5 for quick research, 10 (default) for standard, 20-30 for comprehensive"
+                        },
+                        "max_pages_per_site": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 20,
+                            "default": 5,
+                            "description": "Max pages to crawl from each domain. Higher = more depth per source"
+                        },
+                        "max_total_pages": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 30,
+                            "description": "Total page limit across all sources. Controls overall research breadth"
+                        },
+                        "crawl_depth": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 3,
+                            "default": 2,
+                            "description": "How deep to crawl from each search result. 0=no crawl (just scrape), 1-2=follow links, 3=deep crawl"
+                        },
+                        "include_domains": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Only include results from these domains. Example: ['rust-lang.org', 'docs.rs', 'github.com']"
+                        },
+                        "exclude_domains": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Exclude results from these domains. Example: ['pinterest.com', 'facebook.com']"
+                        },
+                        "search_engines": {
+                            "type": "string",
+                            "description": "Comma-separated search engines. Example: 'google,bing,duckduckgo'"
+                        },
+                        "time_range": {
+                            "type": "string",
+                            "enum": ["day", "week", "month", "year"],
+                            "description": "Limit to recent content. Useful for fast-moving topics"
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": "Preferred language code (e.g., 'en', 'id', 'ja')"
                         }
                     },
                     "required": ["query"]
@@ -505,6 +724,473 @@ impl rmcp::ServerHandler for McpService {
                     Err(e) => {
                         error!("History search error: {}", e);
                         Ok(CallToolResult::success(vec![Content::text(format!("History search failed: {}", e))]))
+                    }
+                }
+            }
+            "scrape_batch" => {
+                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    "Missing required arguments object",
+                    None,
+                ))?;
+
+                // Parse URLs array
+                let urls: Vec<String> = args
+                    .get("urls")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .ok_or_else(|| ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required parameter: urls (array of strings)",
+                        None,
+                    ))?;
+
+                if urls.is_empty() {
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        "Error: urls array cannot be empty".to_string()
+                    )]));
+                }
+
+                if urls.len() > 100 {
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        format!("Error: Maximum 100 URLs per request, got {}", urls.len())
+                    )]));
+                }
+
+                let max_concurrent = args.get("max_concurrent").and_then(|v| v.as_u64()).map(|n| n as usize);
+                let max_chars = args.get("max_chars").and_then(|v| v.as_u64()).map(|n| n as usize);
+                let output_format = args.get("output_format").and_then(|v| v.as_str()).unwrap_or("json");
+
+                info!("Batch scraping {} URLs", urls.len());
+
+                match scrape::scrape_batch(&self.state, urls, max_concurrent, max_chars).await {
+                    Ok(response) => {
+                        if output_format == "json" {
+                            // Return JSON format
+                            let json_str = serde_json::to_string_pretty(&response)
+                                .unwrap_or_else(|e| format!(r#"{{"error": "Failed to serialize: {}"}}"#, e));
+                            Ok(CallToolResult::success(vec![Content::text(json_str)]))
+                        } else {
+                            // Return text format summary
+                            let mut text = format!(
+                                "**Batch Scrape Results**\n\nTotal: {} | Successful: {} | Failed: {} | Duration: {}ms\n\n",
+                                response.total, response.successful, response.failed, response.total_duration_ms
+                            );
+
+                            for (i, result) in response.results.iter().enumerate() {
+                                if result.success {
+                                    if let Some(data) = &result.data {
+                                        text.push_str(&format!(
+                                            "{}. ✅ **{}**\n   URL: {}\n   Words: {} | Score: {:.2} | {}ms\n\n",
+                                            i + 1,
+                                            data.title.chars().take(60).collect::<String>(),
+                                            result.url,
+                                            data.word_count,
+                                            data.extraction_score.unwrap_or(0.0),
+                                            result.duration_ms
+                                        ));
+                                    }
+                                } else {
+                                    text.push_str(&format!(
+                                        "{}. ❌ {}\n   Error: {}\n\n",
+                                        i + 1,
+                                        result.url,
+                                        result.error.as_deref().unwrap_or("Unknown error")
+                                    ));
+                                }
+                            }
+
+                            Ok(CallToolResult::success(vec![Content::text(text)]))
+                        }
+                    }
+                    Err(e) => {
+                        error!("Batch scrape error: {}", e);
+                        Ok(CallToolResult::success(vec![Content::text(format!("Batch scrape failed: {}", e))]))
+                    }
+                }
+            }
+            "crawl_website" => {
+                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    "Missing required arguments object",
+                    None,
+                ))?;
+
+                let url = args
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required parameter: url",
+                        None,
+                    ))?;
+
+                // Parse configuration from args
+                let max_depth = args.get("max_depth").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(3);
+                let max_pages = args.get("max_pages").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(50);
+                let max_concurrent = args.get("max_concurrent").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(5);
+                let same_domain_only = args.get("same_domain_only").and_then(|v| v.as_bool()).unwrap_or(true);
+                let max_chars_per_page = args.get("max_chars_per_page").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(5000);
+
+                let include_patterns: Vec<String> = args
+                    .get("include_patterns")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+
+                let exclude_patterns: Vec<String> = args
+                    .get("exclude_patterns")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+
+                // Build config with defaults + user overrides
+                let mut config = crawl::CrawlConfig::default();
+                config.max_depth = max_depth.min(10);
+                config.max_pages = max_pages.min(500);
+                config.max_concurrent = max_concurrent.min(20);
+                config.same_domain_only = same_domain_only;
+                config.max_chars_per_page = max_chars_per_page;
+
+                if !include_patterns.is_empty() {
+                    config.include_patterns = include_patterns;
+                }
+                if !exclude_patterns.is_empty() {
+                    // Merge with defaults instead of replacing
+                    for pattern in exclude_patterns {
+                        if !config.exclude_patterns.contains(&pattern) {
+                            config.exclude_patterns.push(pattern);
+                        }
+                    }
+                }
+
+                info!("Starting crawl of {} (depth: {}, max_pages: {})", url, config.max_depth, config.max_pages);
+
+                match crawl::crawl_website(&self.state, url, config).await {
+                    Ok(response) => {
+                        // Build text response
+                        let mut text = format!(
+                            "**Crawl Results for {}**\n\n\
+                            📊 **Summary:**\n\
+                            • Pages crawled: {}\n\
+                            • Pages failed: {}\n\
+                            • Max depth reached: {}\n\
+                            • Unique domains: {}\n\
+                            • Total duration: {}ms\n\n",
+                            response.start_url,
+                            response.pages_crawled,
+                            response.pages_failed,
+                            response.max_depth_reached,
+                            response.unique_domains.len(),
+                            response.total_duration_ms
+                        );
+
+                        text.push_str("**📄 Pages Crawled:**\n\n");
+
+                        for (i, result) in response.results.iter().enumerate() {
+                            if result.success {
+                                text.push_str(&format!(
+                                    "{}. ✅ **{}**\n   URL: {}\n   Depth: {} | Words: {} | Links: {} | {}ms\n",
+                                    i + 1,
+                                    result.title.as_deref().unwrap_or("Untitled").chars().take(60).collect::<String>(),
+                                    result.url,
+                                    result.depth,
+                                    result.word_count.unwrap_or(0),
+                                    result.links_found.unwrap_or(0),
+                                    result.duration_ms
+                                ));
+                                if let Some(preview) = &result.content_preview {
+                                    let short_preview: String = preview.chars().take(200).collect();
+                                    text.push_str(&format!("   Preview: {}...\n", short_preview.replace('\n', " ")));
+                                }
+                                text.push('\n');
+                            } else {
+                                text.push_str(&format!(
+                                    "{}. ❌ {}\n   Depth: {} | Error: {}\n\n",
+                                    i + 1,
+                                    result.url,
+                                    result.depth,
+                                    result.error.as_deref().unwrap_or("Unknown error")
+                                ));
+                            }
+                        }
+
+                        // Add sitemap
+                        if let Some(sitemap) = &response.sitemap {
+                            if !sitemap.is_empty() {
+                                text.push_str(&format!("\n**🗺️ Sitemap ({} URLs):**\n", sitemap.len()));
+                                for url in sitemap.iter().take(50) {
+                                    text.push_str(&format!("• {}\n", url));
+                                }
+                                if sitemap.len() > 50 {
+                                    text.push_str(&format!("... and {} more URLs\n", sitemap.len() - 50));
+                                }
+                            }
+                        }
+
+                        Ok(CallToolResult::success(vec![Content::text(text)]))
+                    }
+                    Err(e) => {
+                        error!("Crawl error: {}", e);
+                        Ok(CallToolResult::success(vec![Content::text(format!("Crawl failed: {}", e))]))
+                    }
+                }
+            }
+            "extract_structured" => {
+                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    "Missing required arguments object",
+                    None,
+                ))?;
+
+                let url = args
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required parameter: url",
+                        None,
+                    ))?;
+
+                // Parse schema if provided
+                let schema: Option<Vec<crate::types::ExtractField>> = args
+                    .get("schema")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|item| {
+                                let name = item.get("name")?.as_str()?.to_string();
+                                let description = item.get("description")?.as_str()?.to_string();
+                                let field_type = item.get("field_type").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                let required = item.get("required").and_then(|v| v.as_bool());
+                                Some(crate::types::ExtractField { name, description, field_type, required })
+                            })
+                            .collect()
+                    });
+
+                let prompt = args.get("prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let max_chars = args.get("max_chars").and_then(|v| v.as_u64()).map(|n| n as usize);
+
+                info!("Extracting structured data from: {}", url);
+
+                match extract::extract_structured(&self.state, url, schema, prompt, max_chars).await {
+                    Ok(response) => {
+                        let mut text = format!(
+                            "**Structured Extraction Results**\n\n\
+                            📊 **Extraction Info:**\n\
+                            • URL: {}\n\
+                            • Title: {}\n\
+                            • Method: {}\n\
+                            • Fields Extracted: {}\n\
+                            • Confidence: {:.0}%\n\
+                            • Duration: {}ms\n\n",
+                            response.url,
+                            response.title,
+                            response.extraction_method,
+                            response.field_count,
+                            response.confidence * 100.0,
+                            response.duration_ms
+                        );
+
+                        if !response.warnings.is_empty() {
+                            text.push_str(&format!("⚠️ **Warnings:** {}\n\n", response.warnings.join(", ")));
+                        }
+
+                        // Format extracted data as JSON
+                        text.push_str("**📋 Extracted Data:**\n```json\n");
+                        let json_str = serde_json::to_string_pretty(&response.extracted_data)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        text.push_str(&json_str);
+                        text.push_str("\n```\n\n");
+
+                        // Raw content preview
+                        text.push_str("**📄 Raw Content Preview:**\n");
+                        let preview: String = response.raw_content_preview.chars().take(1000).collect();
+                        text.push_str(&preview);
+                        if response.raw_content_preview.len() > 1000 {
+                            text.push_str("...\n[truncated]");
+                        }
+
+                        Ok(CallToolResult::success(vec![Content::text(text)]))
+                    }
+                    Err(e) => {
+                        error!("Extract error: {}", e);
+                        Ok(CallToolResult::success(vec![Content::text(format!("Extraction failed: {}", e))]))
+                    }
+                }
+            }
+            "deep_research" => {
+                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    "Missing required arguments object",
+                    None,
+                ))?;
+
+                let query = args
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required parameter: query",
+                        None,
+                    ))?;
+
+                // Parse configuration
+                let max_search_results = args.get("max_search_results").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(10);
+                let max_pages_per_site = args.get("max_pages_per_site").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(5);
+                let max_total_pages = args.get("max_total_pages").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(30);
+                let crawl_depth = args.get("crawl_depth").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(2);
+                let search_engines = args.get("search_engines").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let time_range = args.get("time_range").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let language = args.get("language").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                let include_domains: Vec<String> = args
+                    .get("include_domains")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+
+                let exclude_domains: Vec<String> = args
+                    .get("exclude_domains")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+
+                let config = research::DeepResearchConfig {
+                    max_search_results: max_search_results.min(30),
+                    max_pages_per_site: max_pages_per_site.min(20),
+                    max_total_pages: max_total_pages.min(100),
+                    crawl_depth: crawl_depth.min(3),
+                    max_concurrent: 5,
+                    include_domains,
+                    exclude_domains,
+                    search_engines,
+                    time_range,
+                    language,
+                    max_chars_per_page: 5000,
+                };
+
+                info!("Starting deep research for: {}", query);
+
+                match research::deep_research(&self.state, query, config).await {
+                    Ok(response) => {
+                        let mut text = format!(
+                            "# 🔬 Deep Research Results\n\n\
+                            **Query:** {}\n\n\
+                            ## 📊 Statistics\n\
+                            • Search results: {}\n\
+                            • Pages scraped: {}\n\
+                            • Pages crawled: {}\n\
+                            • Total words: {}\n\
+                            • Unique domains: {}\n\
+                            • Code blocks found: {}\n\
+                            • Duration: {}ms\n\n",
+                            response.query,
+                            response.statistics.search_results_found,
+                            response.statistics.pages_scraped,
+                            response.statistics.pages_crawled,
+                            response.statistics.total_words,
+                            response.statistics.unique_domains,
+                            response.statistics.code_blocks_found,
+                            response.statistics.duration_ms
+                        );
+
+                        // Warnings
+                        if !response.warnings.is_empty() {
+                            text.push_str(&format!("⚠️ **Warnings:** {}\n\n", response.warnings.join(", ")));
+                        }
+
+                        // Summary
+                        text.push_str("## 📝 Summary\n\n");
+                        text.push_str(&response.summary.overview);
+                        text.push_str("\n\n");
+
+                        if !response.summary.key_points.is_empty() {
+                            text.push_str("**Key Points:**\n");
+                            for point in &response.summary.key_points {
+                                text.push_str(&format!("• {}\n", point));
+                            }
+                            text.push('\n');
+                        }
+
+                        // Key Findings
+                        if !response.key_findings.is_empty() {
+                            text.push_str("## 💡 Key Findings\n\n");
+                            for finding in &response.key_findings {
+                                text.push_str(&format!("• {}\n", finding));
+                            }
+                            text.push('\n');
+                        }
+
+                        // Topics
+                        if !response.topics.is_empty() {
+                            text.push_str("## 🏷️ Topics Discovered\n\n");
+                            for topic in response.topics.iter().take(8) {
+                                text.push_str(&format!(
+                                    "• **{}** (mentioned {} times across {} sources)\n",
+                                    topic.topic, topic.mentions, topic.sources.len()
+                                ));
+                            }
+                            text.push('\n');
+                        }
+
+                        // Sources
+                        text.push_str("## 📚 Sources\n\n");
+                        for (i, source) in response.sources.iter().enumerate().take(15) {
+                            let crawl_indicator = if source.from_crawl { " 🔗" } else { "" };
+                            text.push_str(&format!(
+                                "{}. **{}**{}\n   {} | {} | {} words | {:.0}% relevance\n",
+                                i + 1,
+                                source.title.chars().take(60).collect::<String>(),
+                                crawl_indicator,
+                                source.url,
+                                source.source_type,
+                                source.word_count,
+                                source.relevance_score * 100.0
+                            ));
+
+                            // Show top headings
+                            if !source.headings.is_empty() {
+                                let headings_preview: String = source.headings.iter().take(3).cloned().collect::<Vec<_>>().join(" | ");
+                                text.push_str(&format!("   📑 {}\n", headings_preview));
+                            }
+
+                            // Content preview
+                            let preview: String = source.content_preview.chars().take(150).collect();
+                            text.push_str(&format!("   {}\n\n", preview.replace('\n', " ")));
+                        }
+
+                        if response.sources.len() > 15 {
+                            text.push_str(&format!("... and {} more sources\n\n", response.sources.len() - 15));
+                        }
+
+                        // Related Queries
+                        if !response.related_queries.is_empty() {
+                            text.push_str("## 🔍 Related Queries for Further Research\n\n");
+                            for query in response.related_queries.iter().take(5) {
+                                text.push_str(&format!("• {}\n", query));
+                            }
+                        }
+
+                        // Content types breakdown
+                        text.push_str("\n## 📊 Content Types\n\n");
+                        for (content_type, count) in &response.summary.content_types {
+                            text.push_str(&format!("• {}: {}\n", content_type, count));
+                        }
+
+                        Ok(CallToolResult::success(vec![Content::text(text)]))
+                    }
+                    Err(e) => {
+                        error!("Deep research error: {}", e);
+                        Ok(CallToolResult::success(vec![Content::text(format!(
+                            "Deep research failed: {}\n\n\
+                            **Suggestions:**\n\
+                            • Try a more specific query\n\
+                            • Check if SearXNG is running\n\
+                            • Reduce max_search_results or max_total_pages\n\
+                            • Try different search_engines",
+                            e
+                        ))]))
                     }
                 }
             }

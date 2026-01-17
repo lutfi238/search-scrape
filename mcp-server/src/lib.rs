@@ -1,5 +1,8 @@
 pub mod search;
 pub mod scrape;
+pub mod crawl;
+pub mod extract;
+pub mod research;
 pub mod types;
 pub mod mcp;
 pub mod rust_scraper;
