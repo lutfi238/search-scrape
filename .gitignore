@@ -15,4 +15,7 @@ scrapy-service/webspider/.scrapy/
 *.pid
 .DS_Store
 .fastembed_cache/
+.firecrawl/
 CLAUDE.md
+
+.worktrees/
