@@ -10,6 +10,7 @@ pub mod stdio_service;
 pub mod history;
 pub mod query_rewriter;
 pub mod llm_client;
+pub mod crawl_jobs;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,6 +25,8 @@ pub struct AppState {
     pub memory: Option<std::sync::Arc<history::MemoryManager>>,
     // BYO LLM client for structured extraction (optional)
     pub llm: Option<std::sync::Arc<llm_client::LlmClient>>,
+    // Async crawl job store
+    pub crawl_jobs: std::sync::Arc<crawl_jobs::CrawlJobStore>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -67,6 +70,9 @@ impl AppState {
             outbound_limit: std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
             memory: None, // Will be initialized if QDRANT_URL is set
             llm,
+            crawl_jobs: std::sync::Arc::new(crawl_jobs::CrawlJobStore::new(
+                std::time::Duration::from_secs(24 * 60 * 60), // 24-hour TTL
+            )),
         }
     }
 
