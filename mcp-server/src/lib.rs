@@ -9,6 +9,7 @@ pub mod rust_scraper;
 pub mod stdio_service;
 pub mod history;
 pub mod query_rewriter;
+pub mod llm_client;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -21,6 +22,8 @@ pub struct AppState {
     pub outbound_limit: std::sync::Arc<tokio::sync::Semaphore>,
     // Memory manager for research history (optional)
     pub memory: Option<std::sync::Arc<history::MemoryManager>>,
+    // BYO LLM client for structured extraction (optional)
+    pub llm: Option<std::sync::Arc<llm_client::LlmClient>>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -28,6 +31,7 @@ impl std::fmt::Debug for AppState {
         f.debug_struct("AppState")
             .field("searxng_url", &self.searxng_url)
             .field("memory_enabled", &self.memory.is_some())
+            .field("llm_enabled", &self.llm.is_some())
             .finish()
     }
 }
@@ -37,6 +41,18 @@ pub use types::*;
 
 impl AppState {
     pub fn new(searxng_url: String, http_client: reqwest::Client) -> Self {
+        // Attempt to initialize LLM client from env; None if not configured
+        let llm = match llm_client::LlmClient::from_env() {
+            Ok(client) => {
+                tracing::info!("LLM client configured: {:?}", client);
+                Some(std::sync::Arc::new(client))
+            }
+            Err(e) => {
+                tracing::debug!("LLM client not configured (optional): {}", e);
+                None
+            }
+        };
+
         Self {
             searxng_url,
             http_client,
@@ -50,11 +66,17 @@ impl AppState {
                 .build(),
             outbound_limit: std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
             memory: None, // Will be initialized if QDRANT_URL is set
+            llm,
         }
     }
 
     pub fn with_memory(mut self, memory: std::sync::Arc<history::MemoryManager>) -> Self {
         self.memory = Some(memory);
+        self
+    }
+
+    pub fn with_llm(mut self, llm: std::sync::Arc<llm_client::LlmClient>) -> Self {
+        self.llm = Some(llm);
         self
     }
 }
