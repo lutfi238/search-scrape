@@ -20,3 +20,4 @@ CLAUDE.md
 
 .worktrees/
 mcp-server/mcp.env
+.mcp.json
