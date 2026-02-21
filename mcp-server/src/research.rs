@@ -5,10 +5,12 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 use crate::crawl::{crawl_website, CrawlConfig};
+use crate::research_jobs::ResearchConfig;
 use crate::scrape::scrape_url;
 use crate::search::{search_web_with_params, SearchParamOverrides};
 use crate::types::*;
 use crate::AppState;
+use chrono::Utc;
 
 /// Configuration for deep research
 #[derive(Clone)]
@@ -695,6 +697,123 @@ fn default_exclude_patterns() -> Vec<String> {
         ".zip".to_string(),
         ".exe".to_string(),
     ]
+}
+
+/// Start an async deep research job, returns job_id
+pub async fn deep_research_async(
+    state: &Arc<AppState>,
+    query: String,
+    config: crate::types::ResearchJobRequest,
+) -> Result<crate::types::ResearchJobResponse> {
+    let research_config = ResearchConfig {
+        max_search_results: config.max_search_results,
+        crawl_depth: config.crawl_depth,
+        max_pages_per_site: config.max_pages_per_site,
+        language: config.language.clone(),
+        time_range: config.time_range.clone(),
+        include_domains: config.include_domains.clone(),
+        exclude_domains: config.exclude_domains.clone(),
+    };
+
+    // Create job
+    let job_id = state
+        .research_jobs
+        .create_job(query.clone(), Some(research_config))
+        .await;
+
+    // Spawn async task to process
+    let state_clone = Arc::clone(state);
+    let query_clone = query.clone();
+    let config_clone = config.clone();
+    let job_id_clone = job_id.clone();
+    tokio::spawn(async move {
+        let store = &state_clone.research_jobs;
+
+        store.mark_running(&job_id_clone).await;
+
+        match build_research_config(config_clone) {
+            Ok(deep_config) => match deep_research(&state_clone, &query_clone, deep_config).await {
+                Ok(report) => {
+                    let final_report = ResearchReport {
+                        query: report.query,
+                        summary: report.summary.overview,
+                        key_findings: report.key_findings,
+                        sources: report.sources,
+                        statistics: report.statistics,
+                    };
+                    store.mark_completed(&job_id_clone, final_report).await;
+                }
+                Err(e) => {
+                    store.mark_failed(&job_id_clone, e.to_string()).await;
+                }
+            },
+            Err(e) => {
+                store.mark_failed(&job_id_clone, e.to_string()).await;
+            }
+        }
+    });
+
+    Ok(crate::types::ResearchJobResponse {
+        job_id,
+        status: crate::types::JobStatus::Queued,
+        created_at: Utc::now().to_rfc3339(),
+    })
+}
+
+/// Check research job status
+pub async fn check_agent_status(
+    state: &Arc<AppState>,
+    job_id: &str,
+    include_results: Option<bool>,
+) -> Result<crate::types::ResearchStatusResponse> {
+    let job = state
+        .research_jobs
+        .get_job(job_id)
+        .await
+        .ok_or_else(|| anyhow!("job {} not found", job_id))?;
+
+    let include_results = include_results.unwrap_or(false);
+
+    let final_report = if include_results && job.final_report.is_some() {
+        job.final_report
+    } else {
+        None
+    };
+
+    Ok(crate::types::ResearchStatusResponse {
+        status: job.status,
+        query: job.query,
+        current_phase: job.progress.current_phase,
+        sources_processed: job.progress.sources_processed,
+        total_sources: job.progress.total_sources,
+        progress_percent: job.progress.progress_percent,
+        final_report,
+        error: job.error,
+    })
+}
+
+fn build_research_config(config: ResearchJobRequest) -> Result<DeepResearchConfig> {
+    let max_search_results = config.max_search_results.unwrap_or(10).min(30);
+    let max_pages_per_site = config.max_pages_per_site.unwrap_or(5).min(20);
+    let crawl_depth = config.crawl_depth.unwrap_or(2).min(3);
+    let max_total_pages = (max_search_results * max_pages_per_site).min(100);
+
+    let include_domains = config.include_domains.unwrap_or_default();
+    let exclude_domains = config.exclude_domains.unwrap_or_default();
+
+    Ok(DeepResearchConfig {
+        max_search_results,
+        max_pages_per_site,
+        max_total_pages,
+        crawl_depth,
+        max_concurrent: 5,
+        include_domains,
+        exclude_domains,
+        search_engines: None,
+        time_range: config.time_range,
+        language: config.language,
+        max_chars_per_page: 5000,
+    })
 }
 
 #[cfg(test)]
