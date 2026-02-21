@@ -113,6 +113,48 @@ cd mcp-server && cargo build --release
 }
 ```
 
+> **Binary name by OS:**
+> - macOS/Linux: `search-scrape-mcp`
+> - Windows: `search-scrape-mcp.exe`
+
+### Option 3: VS Code `mcp.json` Manual Setup (Bypass Gallery)
+
+If VS Code shows `Failed to serialize MCP servers result from https://api.mcp.github.com/v0.1/servers`, add Search-Scrape manually to:
+
+`C:\Users\<your-user>\AppData\Roaming\Code\User\mcp.json`
+
+```json
+{
+  "servers": {
+    "search-scrape-local": {
+      "type": "stdio",
+      "command": "D:/Project_Gabut/search-scrape/mcp-server/target/release/search-scrape-mcp.exe",
+      "cwd": "D:/Project_Gabut/search-scrape/mcp-server",
+      "env": {
+        "SEARXNG_URL": "http://localhost:8888",
+        "QDRANT_URL": "http://localhost:6334",
+        "LLM_BASE_URL": "http://localhost:8317/v1",
+        "LLM_API_KEY": "${input:LLM_API_KEY}",
+        "LLM_MODEL": "gpt-5.1",
+        "LLM_TIMEOUT_MS": "60000",
+        "LLM_MAX_TOKENS": "1500",
+        "LLM_TEMPERATURE": "0.0"
+      }
+    }
+  },
+  "inputs": [
+    {
+      "id": "LLM_API_KEY",
+      "type": "promptString",
+      "description": "API key for OpenAI-compatible LLM",
+      "password": true
+    }
+  ]
+}
+```
+
+After saving the file, run **Developer: Reload Window** in VS Code.
+
 ### Environment Variables
 
 | Variable              | Default                  | Description                                                                                                                                       |
@@ -140,7 +182,7 @@ cd mcp-server && cargo build --release
 | `mcp-server/mcp.env`       | Environment variables passed to Docker container |
 | `mcp-server/model-cache/`  | Persistent cache for fastembed ONNX models       |
 
-## � MCP Tools
+## 🛠️ MCP Tools
 
 ### `search_web` - Advanced Web Search
 
@@ -161,13 +203,15 @@ cd mcp-server && cargo build --release
   "language": "en",
   "safesearch": 1,
   "time_range": "month",
-  "max_results": 20
+  "max_results": 20,
+  "snippet_chars": 320
 }
 ```
 
 **Agent-friendly extras:**
 
 - `max_results`: Limit how many ranked results you return to keep the response concise (1-100, default: 10)
+- `snippet_chars`: Control snippet length per result (20-2000). Default is dynamic: 120 in compact mode, 200 in standard mode
 - The tool surfaces SearXNG `answers`, spelling `corrections`, `suggestions`, and a count of `unresponsive_engines` so agents know when to retry or refine the query
 
 **Enhanced Results (v2.0):**
@@ -220,7 +264,11 @@ trusted = [r for r in results if r['domain'] in ['rust-lang.org', 'tokio.rs']]
   "content_links_only": true, // Optional: smart filter (default: true)
   "max_links": 100, // Optional: limit sources (default: 100, max: 500)
   "max_chars": 10000, // Optional: cap preview length (default: 10000, max: 50000)
-  "output_format": "text" // Optional: "text" (default) or "json"
+  "output_format": "text", // Optional: "text" (default) or "json"
+  "short_content_threshold": 50, // Optional: warning threshold
+  "extraction_score_threshold": 0.4, // Optional: warning threshold (0.0-1.0)
+  "max_headings": 10, // Optional: limit headings shown in text output
+  "max_images": 20 // Optional: limit images shown/returned
 }
 ```
 
@@ -288,8 +336,9 @@ Set `output_format: "json"` to get structured data:
 - `code_blocks`: Extracted code with language detection (e.g., `rust`, `python`, `javascript`)
 - `extraction_score`: Quality assessment (0.0-1.0) based on content richness
 - `truncated`: Boolean flag indicating if content was cut off
-- `warnings`: Array of issues (e.g., `["content_truncated"]`)
+- `warnings`: Array of issues (e.g., `["content_truncated"]`, `"short_content"`, `"low_extraction_score"`, `"raw_markdown_url: ..."`)
 - `domain`: Source domain for filtering/trust assessment
+- Large JSON payloads are capped by `max_chars` and include a `JSON_PAYLOAD_TRUNCATED` marker when clipped
 
 ### `extract_structured` - BYO LLM Structured Extraction
 
@@ -305,7 +354,10 @@ Extract structured JSON from any webpage using your own OpenAI-compatible LLM pr
     {"name": "price", "description": "Product price", "field_type": "number", "required": true}
   ],
   "prompt": "Extract product fields as clean JSON",
-  "max_chars": 10000
+  "max_chars": 10000,
+  "strict": true,
+  "placeholder_word_threshold": 25,
+  "placeholder_empty_ratio": 0.6
 }
 ```
 
@@ -320,6 +372,8 @@ Extract structured JSON from any webpage using your own OpenAI-compatible LLM pr
 ```
 
 Possible `code` values include `LLM_NOT_CONFIGURED`, `LLM_AUTH_FAILED`, `LLM_RATE_LIMITED`, `LLM_TIMEOUT`, `LLM_INVALID_JSON`, `EXTRACT_FAILED`.
+
+If the source URL points to raw markdown/text files (`.md`, `.mdx`, `.rst`, `.txt`, `.csv`, `.toml`, `.yaml`, `.yml`), extraction may return low-confidence/null fields and include a `raw_markdown_url` warning.
 
 ### `crawl_start` and `crawl_status` - Async Crawl Jobs
 
@@ -674,6 +728,12 @@ This error means fastembed can't download or find the ONNX model. Common causes:
 - Ensure home directory exists for appuser (check Dockerfile has `-m -d /home/appuser`)
 - Use volume mount for persistent cache: `-v model-cache:/home/appuser/.cache/fastembed`
 - Check network connectivity: `docker exec <container> curl -I https://huggingface.co`
+
+**VS Code MCP Gallery shows `Failed to serialize MCP servers result ...`:**
+
+- This is a VS Code MCP gallery issue, not a Search-Scrape runtime issue.
+- Use **Option 3: VS Code `mcp.json` Manual Setup (Bypass Gallery)** above.
+- Reload VS Code with **Developer: Reload Window** after editing `mcp.json`.
 
 ## 🤝 Contributing
 

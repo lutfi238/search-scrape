@@ -72,6 +72,9 @@ pub async fn extract_structured(
         .take(max_chars)
         .collect();
 
+    let mut warnings = vec![];
+    maybe_add_raw_url_warning(url, &mut warnings);
+
     Ok(ExtractResponse {
         url: url.to_string(),
         title: scrape_result.title,
@@ -81,7 +84,7 @@ pub async fn extract_structured(
         field_count,
         confidence: 1.0,
         duration_ms: start_time.elapsed().as_millis() as u64,
-        warnings: vec![],
+        warnings,
     })
 }
 
@@ -121,6 +124,29 @@ fn build_extraction_prompt(prompt: Option<&str>, schema: Option<&[ExtractField]>
         )
     } else {
         format!("{} Extract all meaningful data you can find.", base)
+    }
+}
+
+/// Returns true when URL path looks like a raw text/markdown file.
+pub fn is_raw_content_url(url: &str) -> bool {
+    let path_only = url
+        .split(&['?', '#'][..])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+    let ext = path_only.rsplit('.').next().unwrap_or("");
+    matches!(
+        ext,
+        "md" | "mdx" | "rst" | "txt" | "csv" | "toml" | "yaml" | "yml"
+    )
+}
+
+fn maybe_add_raw_url_warning(url: &str, warnings: &mut Vec<String>) {
+    if is_raw_content_url(url) {
+        let warning = "raw_markdown_url: Extraction on raw .md/.mdx/.rst/.txt files is unreliable — fields may return null and confidence will be low.".to_string();
+        if !warnings.iter().any(|w| w == &warning) {
+            warnings.push(warning);
+        }
     }
 }
 
@@ -517,6 +543,31 @@ mod tests {
         let content = "Price: $99.99 or €85.00";
         let result = extract_price(content);
         assert!(!result.is_null());
+    }
+
+    #[test]
+    fn test_is_raw_content_url() {
+        assert!(is_raw_content_url("https://example.com/README.md"));
+        assert!(is_raw_content_url("https://example.com/file.MDX"));
+        assert!(is_raw_content_url("https://example.com/file.txt?token=abc"));
+        assert!(is_raw_content_url("https://example.com/config.yaml"));
+
+        assert!(!is_raw_content_url("https://example.com/page.html"));
+        assert!(!is_raw_content_url("https://example.com/api/data"));
+    }
+
+    #[test]
+    fn test_maybe_add_raw_url_warning_for_raw_file() {
+        let mut warnings = vec![];
+        maybe_add_raw_url_warning("https://example.com/README.md", &mut warnings);
+        assert!(warnings.iter().any(|w| w.contains("raw_markdown_url")));
+    }
+
+    #[test]
+    fn test_maybe_add_raw_url_warning_for_html_is_noop() {
+        let mut warnings = vec![];
+        maybe_add_raw_url_warning("https://example.com/page.html", &mut warnings);
+        assert!(warnings.is_empty());
     }
 
     /// Build a minimal AppState with no LLM client for testing.

@@ -61,6 +61,41 @@ impl McpService {
         CallToolResult::success(vec![Content::text(json)])
     }
 
+    fn cap_json_payload(mut json_str: String, max_chars: usize) -> String {
+        if json_str.chars().count() <= max_chars {
+            return json_str;
+        }
+
+        let full_chars = json_str.chars().count();
+        let marker = format!(
+            " // JSON_PAYLOAD_TRUNCATED: full_payload_chars={}, max_chars={}",
+            full_chars, max_chars
+        );
+
+        let marker_len = marker.chars().count();
+        if max_chars <= marker_len {
+            return marker.chars().take(max_chars).collect();
+        }
+
+        let keep = max_chars - marker_len;
+        json_str = json_str.chars().take(keep).collect();
+        json_str.push_str(&marker);
+        json_str
+    }
+
+    fn push_warning_unique(warnings: &mut Vec<String>, warning: &str) {
+        if !warnings.iter().any(|w| w == warning) {
+            warnings.push(warning.to_string());
+        }
+    }
+
+    fn maybe_add_raw_url_warning(url: &str, warnings: &mut Vec<String>) {
+        if extract::is_raw_content_url(url) {
+            let warning = "raw_markdown_url: Extraction on raw .md/.mdx/.rst/.txt files is unreliable — fields may return null and confidence will be low.";
+            Self::push_warning_unique(warnings, warning);
+        }
+    }
+
     pub async fn new() -> anyhow::Result<Self> {
         tracing_subscriber::fmt()
             .with_writer(std::io::stderr)
@@ -119,7 +154,8 @@ impl McpService {
                         "safesearch": {"type": "integer", "minimum": 0, "maximum": 2, "description": "Safe search: 0=off, 1=moderate (recommended), 2=strict. Default env setting usually sufficient"},
                         "time_range": {"type": "string", "description": "Filter by recency. WHEN TO USE: 'day' for breaking news, 'week' for current events, 'month' for recent tech/trends, 'year' for last 12 months. Omit for all-time results"},
                         "pageno": {"type": "integer", "minimum": 1, "description": "Page number for pagination. TIP: Start with page 1, use page 2+ only if initial results insufficient"},
-                        "max_results": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10, "description": "Max results to return. GUIDANCE: 5-10 for quick facts, 15-25 for balanced research, 30-50 for comprehensive surveys. Default 10 is good for most queries. Higher = more tokens"}
+                        "max_results": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10, "description": "Max results to return. GUIDANCE: 5-10 for quick facts, 15-25 for balanced research, 30-50 for comprehensive surveys. Default 10 is good for most queries. Higher = more tokens"},
+                        "snippet_chars": {"type": "integer", "minimum": 20, "maximum": 2000, "description": "Max characters per result snippet. Default: 120 (compact mode) or 200 (standard). Increase for deeper context, decrease to save tokens"}
                     },
                     "required": ["query"]
                 }) {
@@ -163,6 +199,27 @@ impl McpService {
                             "enum": ["text", "json"],
                             "description": "Output format. 'text' (default) returns formatted markdown for humans. 'json' returns structured JSON for agents/parsing. AGENT TIP: Use 'json' to get extraction_score, truncated flag, code_blocks array, and all metadata as machine-readable fields",
                             "default": "text"
+                        },
+                        "short_content_threshold": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Word-count threshold for adding 'short_content' warning. Default: 50"
+                        },
+                        "extraction_score_threshold": {
+                            "type": "number",
+                            "minimum": 0.0,
+                            "maximum": 1.0,
+                            "description": "Score threshold for adding 'low_extraction_score' warning. Default: 0.4"
+                        },
+                        "max_headings": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Maximum headings to include in output. Omit to keep current default behavior"
+                        },
+                        "max_images": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Maximum images to include in output payload. Omit to keep current default behavior"
                         }
                     },
                     "required": ["url"]
@@ -856,6 +913,10 @@ impl rmcp::ServerHandler for McpService {
                     .and_then(|v| v.as_u64())
                     .map(|n| n as usize)
                     .unwrap_or(10);
+                let snippet_chars = args
+                    .get("snippet_chars")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize);
                 let overrides = crate::search::SearchParamOverrides {
                     engines,
                     categories,
@@ -940,12 +1001,13 @@ impl rmcp::ServerHandler for McpService {
 
                             // Show search results
                             for (i, result) in limited_results.enumerate() {
+                                let limit = snippet_chars.unwrap_or(200);
                                 text.push_str(&format!(
                                     "{}. **{}**\n   URL: {}\n   Snippet: {}\n\n",
                                     i + 1,
                                     result.title,
                                     result.url,
-                                    result.content.chars().take(200).collect::<String>()
+                                    result.content.chars().take(limit).collect::<String>()
                                 ));
                             }
 
@@ -1020,13 +1082,31 @@ impl rmcp::ServerHandler for McpService {
                         content.truncated = content.clean_content.len() > max_chars;
 
                         if content.truncated {
-                            content.warnings.push("content_truncated".to_string());
+                            Self::push_warning_unique(&mut content.warnings, "content_truncated");
                         }
-                        if content.word_count < 50 {
-                            content.warnings.push("short_content".to_string());
+                        Self::maybe_add_raw_url_warning(url, &mut content.warnings);
+                        let short_content_threshold = args
+                            .get("short_content_threshold")
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n as usize)
+                            .unwrap_or(50);
+                        let extraction_score_threshold = args
+                            .get("extraction_score_threshold")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.4);
+
+                        if content.word_count < short_content_threshold {
+                            Self::push_warning_unique(&mut content.warnings, "short_content");
                         }
-                        if content.extraction_score.map(|s| s < 0.4).unwrap_or(false) {
-                            content.warnings.push("low_extraction_score".to_string());
+                        if content
+                            .extraction_score
+                            .map(|s| s < extraction_score_threshold)
+                            .unwrap_or(false)
+                        {
+                            Self::push_warning_unique(
+                                &mut content.warnings,
+                                "low_extraction_score",
+                            );
                         }
 
                         // Check for output_format parameter (Priority 1)
@@ -1036,12 +1116,22 @@ impl rmcp::ServerHandler for McpService {
                             .unwrap_or("text");
 
                         if output_format == "json" {
-                            // Return JSON format
+                            let max_images = args
+                                .get("max_images")
+                                .and_then(|v| v.as_u64())
+                                .map(|n| n as usize)
+                                .unwrap_or(content.images.len());
+                            if content.images.len() > max_images {
+                                content.images.truncate(max_images);
+                            }
+
+                            // Return JSON format (capped total payload size)
                             let json_str =
                                 serde_json::to_string_pretty(&content).unwrap_or_else(|e| {
                                     format!(r#"{{"error": "Failed to serialize: {}"}}"#, e)
                                 });
-                            return Ok(CallToolResult::success(vec![Content::text(json_str)]));
+                            let capped = Self::cap_json_payload(json_str, max_chars);
+                            return Ok(CallToolResult::success(vec![Content::text(capped)]));
                         }
 
                         // Otherwise return formatted text (backward compatible)
@@ -1107,6 +1197,27 @@ impl rmcp::ServerHandler for McpService {
                             sources
                         };
 
+                        let max_headings = args
+                            .get("max_headings")
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n as usize)
+                            .unwrap_or(content.headings.len());
+                        let max_images = args
+                            .get("max_images")
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n as usize)
+                            .unwrap_or(content.images.len());
+
+                        let shown_headings = content
+                            .headings
+                            .iter()
+                            .take(max_headings)
+                            .map(|h| format!("- {} {}", h.level.to_uppercase(), h.text))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+
+                        let shown_images = content.images.len().min(max_images);
+
                         let content_text = format!(
                             "**{}**\n\nURL: {}\nWord Count: {}\nLanguage: {}\n\n**Content:**\n{}\n\n**Metadata:**\n- Description: {}\n- Keywords: {}\n\n**Headings:**\n{}\n\n**Links Found:** {}\n**Images Found:** {}{}",
                             content.title,
@@ -1116,12 +1227,9 @@ impl rmcp::ServerHandler for McpService {
                             content_preview,
                             content.meta_description,
                             content.meta_keywords,
-                            content.headings.iter()
-                                .map(|h| format!("- {} {}", h.level.to_uppercase(), h.text))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
+                            shown_headings,
                             content.links.len(),
-                            content.images.len(),
+                            shown_images,
                             sources_section
                         );
 
@@ -2073,6 +2181,112 @@ mod tests {
         assert!(
             required_strs.contains(&"url"),
             "url should be in required list"
+        );
+    }
+
+    #[test]
+    fn test_scrape_url_schema_contains_tunable_params() {
+        let svc = test_service();
+        let tools = svc.tool_definitions();
+        let scrape_tool = tools
+            .iter()
+            .find(|t| t.name == "scrape_url")
+            .expect("scrape_url tool should exist");
+
+        let schema_value = serde_json::Value::Object(scrape_tool.input_schema.as_ref().clone());
+        let props = schema_value
+            .get("properties")
+            .expect("scrape_url should have properties");
+
+        assert!(
+            props.get("short_content_threshold").is_some(),
+            "scrape_url should include short_content_threshold"
+        );
+        assert!(
+            props.get("extraction_score_threshold").is_some(),
+            "scrape_url should include extraction_score_threshold"
+        );
+        assert!(
+            props.get("max_headings").is_some(),
+            "scrape_url should include max_headings"
+        );
+        assert!(
+            props.get("max_images").is_some(),
+            "scrape_url should include max_images"
+        );
+    }
+
+    #[test]
+    fn test_search_web_schema_contains_snippet_chars() {
+        let svc = test_service();
+        let tools = svc.tool_definitions();
+        let search_tool = tools
+            .iter()
+            .find(|t| t.name == "search_web")
+            .expect("search_web tool should exist");
+
+        let schema_value = serde_json::Value::Object(search_tool.input_schema.as_ref().clone());
+        let props = schema_value
+            .get("properties")
+            .expect("search_web should have properties");
+
+        assert!(
+            props.get("snippet_chars").is_some(),
+            "search_web should include snippet_chars"
+        );
+    }
+
+    #[test]
+    fn test_cap_json_payload_truncates_large_output() {
+        let long_json = "a".repeat(300);
+        let capped = McpService::cap_json_payload(long_json, 80);
+
+        assert!(
+            capped.chars().count() <= 80,
+            "capped payload should be <= max_chars"
+        );
+        assert!(
+            capped.contains("JSON_PAYLOAD_TRUNCATED"),
+            "capped payload should include truncation marker"
+        );
+    }
+
+    #[test]
+    fn test_maybe_add_raw_url_warning_for_raw_file() {
+        let mut warnings: Vec<String> = vec![];
+        McpService::maybe_add_raw_url_warning("https://example.com/README.md", &mut warnings);
+
+        assert!(
+            warnings.iter().any(|w| w.contains("raw_markdown_url")),
+            "raw markdown URL should add raw_markdown_url warning"
+        );
+    }
+
+    #[test]
+    fn test_maybe_add_raw_url_warning_avoids_duplicates() {
+        let mut warnings: Vec<String> = vec![];
+        McpService::maybe_add_raw_url_warning("https://example.com/file.txt", &mut warnings);
+        McpService::maybe_add_raw_url_warning("https://example.com/file.txt", &mut warnings);
+
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|w| w.as_str().contains("raw_markdown_url"))
+                .count(),
+            1,
+            "raw_markdown_url warning should not be duplicated"
+        );
+    }
+
+    #[test]
+    fn test_push_warning_unique_helper_avoids_duplicates() {
+        let mut warnings = vec!["short_content".to_string()];
+        McpService::push_warning_unique(&mut warnings, "short_content");
+
+        assert_eq!(
+            warnings.iter().filter(|w| w.as_str() == "short_content").count(),
+            1,
+            "push_warning_unique should not duplicate existing warnings"
         );
     }
 

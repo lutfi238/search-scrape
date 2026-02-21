@@ -40,6 +40,41 @@ pub struct McpContent {
     pub text: String,
 }
 
+fn cap_json_payload(mut json_str: String, max_chars: usize) -> String {
+    if json_str.chars().count() <= max_chars {
+        return json_str;
+    }
+
+    let full_chars = json_str.chars().count();
+    let marker = format!(
+        " // JSON_PAYLOAD_TRUNCATED: full_payload_chars={}, max_chars={}",
+        full_chars, max_chars
+    );
+
+    let marker_len = marker.chars().count();
+    if max_chars <= marker_len {
+        return marker.chars().take(max_chars).collect();
+    }
+
+    let keep = max_chars - marker_len;
+    json_str = json_str.chars().take(keep).collect();
+    json_str.push_str(&marker);
+    json_str
+}
+
+fn push_warning_unique(warnings: &mut Vec<String>, warning: &str) {
+    if !warnings.iter().any(|w| w == warning) {
+        warnings.push(warning.to_string());
+    }
+}
+
+fn maybe_add_raw_url_warning(url: &str, warnings: &mut Vec<String>) {
+    if crate::extract::is_raw_content_url(url) {
+        let warning = "raw_markdown_url: Extraction on raw .md/.mdx/.rst/.txt files is unreliable — fields may return null and confidence will be low.";
+        push_warning_unique(warnings, warning);
+    }
+}
+
 pub async fn list_tools() -> Json<McpToolsResponse> {
     let tools = vec![
         McpTool {
@@ -85,6 +120,12 @@ pub async fn list_tools() -> Json<McpToolsResponse> {
                         "maximum": 100,
                         "default": 10,
                         "description": "Max results to return. GUIDANCE: 5-10 for quick facts, 15-25 for balanced research, 30-50 for comprehensive surveys. Default 10 is good for most queries. Higher = more tokens"
+                    },
+                    "snippet_chars": {
+                        "type": "integer",
+                        "minimum": 20,
+                        "maximum": 2000,
+                        "description": "Max characters per result snippet. Default: 200"
                     }
                 },
                 "required": ["query"]
@@ -124,6 +165,27 @@ pub async fn list_tools() -> Json<McpToolsResponse> {
                         "enum": ["text", "json"],
                         "description": "Output format. 'text' (default) returns formatted markdown for humans. 'json' returns structured JSON for agents/parsing. AGENT TIP: Use 'json' to get extraction_score, truncated flag, code_blocks array, and all metadata as machine-readable fields",
                         "default": "text"
+                    },
+                    "short_content_threshold": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Word-count threshold for adding 'short_content' warning. Default: 50"
+                    },
+                    "extraction_score_threshold": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "Score threshold for adding 'low_extraction_score' warning. Default: 0.4"
+                    },
+                    "max_headings": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Maximum headings to include in output. Omit to keep current default behavior"
+                    },
+                    "max_images": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Maximum images to include in output payload. Omit to keep current default behavior"
                     }
                 },
                 "required": ["url"]
@@ -180,7 +242,11 @@ pub async fn call_tool(
                 .and_then(|v| v.as_u64())
                 .map(|n| n as usize)
                 .unwrap_or(10);
-            
+            let snippet_chars = request.arguments
+                .get("snippet_chars")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
+
             // Perform search
             let ov_opt = Some(overrides);
             match search::search_web_with_params(&state, query, ov_opt).await {
@@ -216,12 +282,13 @@ pub async fn call_tool(
                         }
                         
                         for (i, result) in limited_results.enumerate() {
+                            let limit = snippet_chars.unwrap_or(200);
                             text.push_str(&format!(
                                 "{}. **{}**\n   URL: {}\n   Snippet: {}\n\n",
                                 i + 1,
                                 result.title,
                                 result.url,
-                                result.content.chars().take(200).collect::<String>()
+                                result.content.chars().take(limit).collect::<String>()
                             ));
                         }
                         
@@ -285,13 +352,24 @@ pub async fn call_tool(
                     content.truncated = content.clean_content.len() > max_chars;
                     
                     if content.truncated {
-                        content.warnings.push("content_truncated".to_string());
+                        push_warning_unique(&mut content.warnings, "content_truncated");
                     }
-                    if content.word_count < 50 {
-                        content.warnings.push("short_content".to_string());
+                    maybe_add_raw_url_warning(url, &mut content.warnings);
+                    let short_content_threshold = request.arguments
+                        .get("short_content_threshold")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize)
+                        .unwrap_or(50);
+                    let extraction_score_threshold = request.arguments
+                        .get("extraction_score_threshold")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.4);
+
+                    if content.word_count < short_content_threshold {
+                        push_warning_unique(&mut content.warnings, "short_content");
                     }
-                    if content.extraction_score.map(|s| s < 0.4).unwrap_or(false) {
-                        content.warnings.push("low_extraction_score".to_string());
+                    if content.extraction_score.map(|s| s < extraction_score_threshold).unwrap_or(false) {
+                        push_warning_unique(&mut content.warnings, "low_extraction_score");
                     }
                     
                     // Check for output_format parameter (Priority 1)
@@ -301,13 +379,23 @@ pub async fn call_tool(
                         .unwrap_or("text");
                     
                     if output_format == "json" {
-                        // Return JSON format directly as text
+                        let max_images = request.arguments
+                            .get("max_images")
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n as usize)
+                            .unwrap_or(content.images.len());
+                        if content.images.len() > max_images {
+                            content.images.truncate(max_images);
+                        }
+
+                        // Return JSON format directly as text (capped total payload size)
                         let json_str = serde_json::to_string_pretty(&content)
                             .unwrap_or_else(|e| format!(r#"{{"error": "Failed to serialize: {}"}}"#, e));
+                        let capped = cap_json_payload(json_str, max_chars);
                         return Ok(Json(McpCallResponse {
                             content: vec![McpContent {
                                 content_type: "text".to_string(),
-                                text: json_str,
+                                text: capped,
                             }],
                             is_error: false,
                         }));
@@ -335,8 +423,19 @@ pub async fn call_tool(
                             }
                         };
                         
+                        let max_headings = request.arguments
+                            .get("max_headings")
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n as usize)
+                            .unwrap_or(10);
+                        let max_images = request.arguments
+                            .get("max_images")
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n as usize)
+                            .unwrap_or(content.images.len());
+
                         let headings = content.headings.iter()
-                            .take(10)
+                            .take(max_headings)
                             .map(|h| format!("- {} {}", h.level.to_uppercase(), h.text))
                             .collect::<Vec<_>>()
                             .join("\n");
@@ -383,7 +482,7 @@ pub async fn call_tool(
                             content.og_image.as_deref().unwrap_or("-"),
                             headings,
                             content.links.len(),
-                            content.images.len(),
+                            content.images.len().min(max_images),
                             content_preview,
                             sources_section
                         )
