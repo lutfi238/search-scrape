@@ -7,6 +7,7 @@ pub mod llm_client;
 pub mod mcp;
 pub mod query_rewriter;
 pub mod research;
+pub mod research_jobs;
 pub mod rust_scraper;
 pub mod scrape;
 pub mod search;
