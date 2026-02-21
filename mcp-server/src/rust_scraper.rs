@@ -501,6 +501,7 @@ impl RustScraper {
             // Remove very short noisy lines and those matching garbage
             if line_trim.len() < 3 { continue; }
             if re_garbage.is_match(line_trim) { continue; }
+            if is_json_noise_line(line_trim) { continue; }
             kept.push(line_trim.to_string());
         }
 
@@ -865,6 +866,33 @@ fn extract_github_embedded_content(json: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// Returns true when a single text line looks like a leaked JSON fragment
+/// rather than human-readable prose, so callers can drop it during post-cleaning.
+///
+/// Rules (the guard must hold, then either 2a or 2b suffices):
+/// 1. Line is at least 20 characters long (short lines are never noise by this check).
+/// 2a. OR the line starts with `{` or `[` and is longer than 40 chars.
+/// 2b. OR the ratio of structural JSON characters (`{`, `}`, `[`, `]`, `"`, `:`, `,`)
+///     to total characters is >= 0.55.
+fn is_json_noise_line(line: &str) -> bool {
+    let char_count = line.chars().count();
+    if char_count < 20 {
+        return false;
+    }
+
+    let first = line.chars().next().unwrap_or(' ');
+    if matches!(first, '{' | '[') && char_count > 40 {
+        return true;
+    }
+
+    let structural = line
+        .chars()
+        .filter(|c| matches!(c, '{' | '}' | '[' | ']' | '"' | ':' | ','))
+        .count();
+
+    (structural as f32 / char_count as f32) >= 0.55
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,5 +950,33 @@ mod tests {
             extract_github_embedded_content(&json).as_deref(),
             Some("## Readme\nrepo overview")
         );
+    }
+
+    #[test]
+    fn test_is_json_noise_line_detects_json_fragments() {
+        assert!(is_json_noise_line(r#"{"payload":{"a":1,"b":2,"c":3}}"#));
+        assert!(is_json_noise_line(r#"{"allShortcutsEnabled":false,"refInfo":{}}"#));
+    }
+
+    #[test]
+    fn test_is_json_noise_line_keeps_prose() {
+        assert!(!is_json_noise_line("This is a regular sentence about Rust scraping."));
+        assert!(!is_json_noise_line("## Installation"));
+        assert!(!is_json_noise_line(r#"{"a":1}"#)); // short JSON stays
+    }
+
+    /// Exercises the ratio branch (2b): line does NOT start with `{` or `[`
+    /// but the structural-character ratio is >= 0.55.
+    #[test]
+    fn test_is_json_noise_line_ratio_branch() {
+        // 20 chars, starts with 'x' (not brace/bracket).
+        // structural chars: 18 of 20 => ratio 0.90 >= 0.55.
+        let high_ratio_no_brace = "xy:,\":,\":,\":,\":,\":,\"";
+        assert_eq!(high_ratio_no_brace.chars().count(), 20);
+        assert!(!high_ratio_no_brace.starts_with('{') && !high_ratio_no_brace.starts_with('['));
+        assert!(is_json_noise_line(high_ratio_no_brace));
+
+        // Sanity check: a plain-prose line of similar length must NOT trigger.
+        assert!(!is_json_noise_line("This sentence is prose and has no JSON chars."));
     }
 }
