@@ -29,6 +29,10 @@ pub struct AppState {
     pub llm: Option<std::sync::Arc<llm_client::LlmClient>>,
     // Async crawl job store
     pub crawl_jobs: std::sync::Arc<crawl_jobs::CrawlJobStore>,
+    // Async batch scrape job store
+    pub batch_jobs: std::sync::Arc<batch_jobs::BatchJobStore>,
+    // Async research job store
+    pub research_jobs: std::sync::Arc<research_jobs::ResearchJobStore>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -73,6 +77,12 @@ impl AppState {
             memory: None, // Will be initialized if QDRANT_URL is set
             llm,
             crawl_jobs: std::sync::Arc::new(crawl_jobs::CrawlJobStore::new(
+                std::time::Duration::from_secs(24 * 60 * 60), // 24-hour TTL
+            )),
+            batch_jobs: std::sync::Arc::new(batch_jobs::BatchJobStore::new(
+                std::time::Duration::from_secs(24 * 60 * 60), // 24-hour TTL
+            )),
+            research_jobs: std::sync::Arc::new(research_jobs::ResearchJobStore::new(
                 std::time::Duration::from_secs(24 * 60 * 60), // 24-hour TTL
             )),
         }
