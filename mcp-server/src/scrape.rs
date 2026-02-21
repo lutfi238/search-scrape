@@ -4,10 +4,12 @@ use crate::AppState;
 use anyhow::{anyhow, Result};
 use backoff::future::retry;
 use backoff::ExponentialBackoffBuilder;
+use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use select::predicate::Predicate;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::Semaphore;
 use tracing::info;
 
 /// Rewrite GitHub blob URLs to raw.githubusercontent.com for clean content fetch.
@@ -367,6 +369,183 @@ pub async fn scrape_batch(
         total_duration_ms,
         results,
     })
+}
+
+/// Start an async batch scrape job, returns job_id
+pub async fn scrape_batch_async(
+    state: &Arc<AppState>,
+    urls: Vec<String>,
+    max_concurrent: Option<usize>,
+    max_chars: Option<usize>,
+) -> Result<BatchJobResponse> {
+    let urls = urls.into_iter().take(100).collect::<Vec<_>>();
+    let total = urls.len();
+
+    if total == 0 {
+        return Err(anyhow!("urls cannot be empty"));
+    }
+
+    let concurrency = max_concurrent.unwrap_or(10).min(50);
+    let max_chars = max_chars.unwrap_or(10000);
+
+    // Create job
+    let job_id = state
+        .batch_jobs
+        .create_job(urls.clone(), concurrency, max_chars)
+        .await;
+
+    // Spawn async task to process
+    let state_clone = Arc::clone(state);
+    let urls_clone = urls.clone();
+    let job_id_clone = job_id.clone();
+    tokio::spawn(async move {
+        let store = &state_clone.batch_jobs;
+
+        store.mark_running(&job_id_clone).await;
+
+        // Process URLs
+        let results = process_batch_urls(
+            &state_clone,
+            &job_id_clone,
+            urls_clone,
+            concurrency,
+            max_chars,
+        )
+        .await;
+
+        match results {
+            Ok(r) => {
+                store.mark_completed(&job_id_clone, r).await;
+            }
+            Err(e) => {
+                store.mark_failed(&job_id_clone, e.to_string()).await;
+            }
+        }
+    });
+
+    Ok(BatchJobResponse {
+        job_id,
+        status: JobStatus::Queued,
+        urls_total: total,
+        created_at: Utc::now().to_rfc3339(),
+    })
+}
+
+/// Check batch job status
+pub async fn check_batch_status(
+    state: &Arc<AppState>,
+    job_id: &str,
+    include_results: Option<bool>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<BatchStatusResponse> {
+    let job = state
+        .batch_jobs
+        .get_job(job_id)
+        .await
+        .ok_or_else(|| anyhow!("job {} not found", job_id))?;
+
+    let include_results = include_results.unwrap_or(false);
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(50);
+
+    let results = if include_results {
+        job.results
+            .map(|all_results| all_results.into_iter().skip(offset).take(limit).collect())
+    } else {
+        None
+    };
+
+    Ok(BatchStatusResponse {
+        status: job.status,
+        urls_total: job.urls.len(),
+        urls_completed: job.progress.urls_completed,
+        urls_failed: job.progress.urls_failed,
+        progress_percent: job.progress.progress_percent,
+        results,
+        error: job.error,
+    })
+}
+
+/// Internal: process URLs for batch scrape
+async fn process_batch_urls(
+    state: &Arc<AppState>,
+    job_id: &str,
+    urls: Vec<String>,
+    concurrency: usize,
+    max_chars: usize,
+) -> Result<Vec<ScrapeBatchResult>> {
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let state_clone = Arc::clone(state);
+    let store = Arc::clone(&state.batch_jobs);
+
+    let total = urls.len();
+    let results: Vec<ScrapeBatchResult> = stream::iter(urls)
+        .map(|url| {
+            let state = Arc::clone(&state_clone);
+            let sem = Arc::clone(&semaphore);
+            let store = Arc::clone(&store);
+            let job_id = job_id.to_string();
+            async move {
+                let _permit = sem.acquire().await.expect("semaphore closed");
+                let start = Instant::now();
+
+                let result = match scrape_url(&state, &url).await {
+                    Ok(data) => {
+                        let actual = data.clean_content.len();
+                        let (clean_content, truncated) = if max_chars > 0 && actual > max_chars {
+                            (data.clean_content.chars().take(max_chars).collect(), true)
+                        } else {
+                            (data.clean_content, false)
+                        };
+
+                        let mut warnings = data.warnings;
+                        if truncated && !warnings.contains(&"content_truncated".to_string()) {
+                            warnings.push("content_truncated".to_string());
+                        }
+
+                        let response = ScrapeResponse {
+                            clean_content,
+                            truncated,
+                            actual_chars: actual,
+                            max_chars_limit: Some(max_chars),
+                            warnings,
+                            ..data
+                        };
+
+                        ScrapeBatchResult {
+                            url: url.clone(),
+                            success: true,
+                            data: Some(response),
+                            error: None,
+                            duration_ms: start.elapsed().as_millis() as u64,
+                        }
+                    }
+                    Err(e) => ScrapeBatchResult {
+                        url,
+                        success: false,
+                        data: None,
+                        error: Some(e.to_string()),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                    },
+                };
+
+                if let Some(job) = store.get_job(&job_id).await {
+                    let completed = job.progress.urls_completed + if result.success { 1 } else { 0 };
+                    let failed = job.progress.urls_failed + if result.success { 0 } else { 1 };
+                    store
+                        .update_progress(&job_id, completed, failed, total)
+                        .await;
+                }
+
+                result
+            }
+        })
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+
+    Ok(results)
 }
 
 #[cfg(test)]
