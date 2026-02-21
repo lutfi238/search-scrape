@@ -155,7 +155,7 @@ impl McpService {
                         "time_range": {"type": "string", "description": "Filter by recency. WHEN TO USE: 'day' for breaking news, 'week' for current events, 'month' for recent tech/trends, 'year' for last 12 months. Omit for all-time results"},
                         "pageno": {"type": "integer", "minimum": 1, "description": "Page number for pagination. TIP: Start with page 1, use page 2+ only if initial results insufficient"},
                         "max_results": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10, "description": "Max results to return. GUIDANCE: 5-10 for quick facts, 15-25 for balanced research, 30-50 for comprehensive surveys. Default 10 is good for most queries. Higher = more tokens"},
-                        "snippet_chars": {"type": "integer", "minimum": 20, "maximum": 2000, "description": "Max characters per result snippet. Default: 120 (compact mode) or 200 (standard). Increase for deeper context, decrease to save tokens"}
+                        "snippet_chars": {"type": "integer", "minimum": 20, "maximum": 2000, "description": "Max characters per result snippet. Default: 200. Increase for deeper context, decrease to save tokens"}
                     },
                     "required": ["query"]
                 }) {
@@ -1201,7 +1201,7 @@ impl rmcp::ServerHandler for McpService {
                             .get("max_headings")
                             .and_then(|v| v.as_u64())
                             .map(|n| n as usize)
-                            .unwrap_or(content.headings.len());
+                            .unwrap_or(10);
                         let max_images = args
                             .get("max_images")
                             .and_then(|v| v.as_u64())

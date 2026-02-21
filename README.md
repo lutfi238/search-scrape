@@ -211,7 +211,7 @@ After saving the file, run **Developer: Reload Window** in VS Code.
 **Agent-friendly extras:**
 
 - `max_results`: Limit how many ranked results you return to keep the response concise (1-100, default: 10)
-- `snippet_chars`: Control snippet length per result (20-2000). Default is dynamic: 120 in compact mode, 200 in standard mode
+- `snippet_chars`: Control snippet length per result (20-2000). Default: 200
 - The tool surfaces SearXNG `answers`, spelling `corrections`, `suggestions`, and a count of `unresponsive_engines` so agents know when to retry or refine the query
 
 **Enhanced Results (v2.0):**
