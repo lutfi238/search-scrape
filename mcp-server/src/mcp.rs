@@ -1,13 +1,9 @@
 use crate::types::*;
-use crate::{search, scrape, AppState};
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-};
+use crate::{scrape, search, AppState};
+use axum::{extract::State, http::StatusCode, response::Json};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{info, error};
+use tracing::{error, info};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct McpTool {
@@ -192,7 +188,7 @@ pub async fn list_tools() -> Json<McpToolsResponse> {
             }),
         },
     ];
-    
+
     Json(McpToolsResponse { tools })
 }
 
@@ -200,12 +196,16 @@ pub async fn call_tool(
     State(state): State<Arc<AppState>>,
     Json(request): Json<McpCallRequest>,
 ) -> Result<Json<McpCallResponse>, (StatusCode, Json<ErrorResponse>)> {
-    info!("MCP tool call: {} with args: {:?}", request.name, request.arguments);
-    
+    info!(
+        "MCP tool call: {} with args: {:?}",
+        request.name, request.arguments
+    );
+
     match request.name.as_str() {
         "search_web" => {
             // Extract query from arguments
-            let query = request.arguments
+            let query = request
+                .arguments
                 .get("query")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
@@ -219,13 +219,19 @@ pub async fn call_tool(
             // Optional SearXNG overrides
             let mut overrides = search::SearchParamOverrides::default();
             if let Some(v) = request.arguments.get("engines").and_then(|v| v.as_str()) {
-                if !v.is_empty() { overrides.engines = Some(v.to_string()); }
+                if !v.is_empty() {
+                    overrides.engines = Some(v.to_string());
+                }
             }
             if let Some(v) = request.arguments.get("categories").and_then(|v| v.as_str()) {
-                if !v.is_empty() { overrides.categories = Some(v.to_string()); }
+                if !v.is_empty() {
+                    overrides.categories = Some(v.to_string());
+                }
             }
             if let Some(v) = request.arguments.get("language").and_then(|v| v.as_str()) {
-                if !v.is_empty() { overrides.language = Some(v.to_string()); }
+                if !v.is_empty() {
+                    overrides.language = Some(v.to_string());
+                }
             }
             if let Some(v) = request.arguments.get("time_range").and_then(|v| v.as_str()) {
                 overrides.time_range = Some(v.to_string());
@@ -236,13 +242,15 @@ pub async fn call_tool(
             if let Some(v) = request.arguments.get("pageno").and_then(|v| v.as_u64()) {
                 overrides.pageno = Some(v as u32);
             }
-            
-            let max_results = request.arguments
+
+            let max_results = request
+                .arguments
                 .get("max_results")
                 .and_then(|v| v.as_u64())
                 .map(|n| n as usize)
                 .unwrap_or(10);
-            let snippet_chars = request.arguments
+            let snippet_chars = request
+                .arguments
                 .get("snippet_chars")
                 .and_then(|v| v.as_u64())
                 .map(|n| n as usize);
@@ -252,13 +260,20 @@ pub async fn call_tool(
             match search::search_web_with_params(&state, query, ov_opt).await {
                 Ok((results, extras)) => {
                     let content_text = if results.is_empty() {
-                        let mut text = format!("No search results found for query: '{}'\n\n", query);
-                        
+                        let mut text =
+                            format!("No search results found for query: '{}'\n\n", query);
+
                         if !extras.suggestions.is_empty() {
-                            text.push_str(&format!("**Suggestions:** {}\n", extras.suggestions.join(", ")));
+                            text.push_str(&format!(
+                                "**Suggestions:** {}\n",
+                                extras.suggestions.join(", ")
+                            ));
                         }
                         if !extras.corrections.is_empty() {
-                            text.push_str(&format!("**Did you mean:** {}\n", extras.corrections.join(", ")));
+                            text.push_str(&format!(
+                                "**Did you mean:** {}\n",
+                                extras.corrections.join(", ")
+                            ));
                         }
                         if !extras.unresponsive_engines.is_empty() {
                             text.push_str(&format!("\n**Note:** {} search engine(s) did not respond. Try different engines or retry.\n", extras.unresponsive_engines.len()));
@@ -267,20 +282,21 @@ pub async fn call_tool(
                     } else {
                         let limited_results = results.iter().take(max_results);
                         let result_count = results.len();
-                        
-                        let mut text = format!("Found {} search results for '{}':", result_count, query);
+
+                        let mut text =
+                            format!("Found {} search results for '{}':", result_count, query);
                         if result_count > max_results {
                             text.push_str(&format!(" (showing top {})\n", max_results));
                         }
                         text.push_str("\n\n");
-                        
+
                         if !extras.answers.is_empty() {
                             text.push_str("**Instant Answers:**\n");
                             for answer in &extras.answers {
                                 text.push_str(&format!("📌 {}\n\n", answer));
                             }
                         }
-                        
+
                         for (i, result) in limited_results.enumerate() {
                             let limit = snippet_chars.unwrap_or(200);
                             text.push_str(&format!(
@@ -291,17 +307,20 @@ pub async fn call_tool(
                                 result.content.chars().take(limit).collect::<String>()
                             ));
                         }
-                        
+
                         if !extras.suggestions.is_empty() {
-                            text.push_str(&format!("\n**Related searches:** {}\n", extras.suggestions.join(", ")));
+                            text.push_str(&format!(
+                                "\n**Related searches:** {}\n",
+                                extras.suggestions.join(", ")
+                            ));
                         }
                         if !extras.unresponsive_engines.is_empty() {
                             text.push_str(&format!("\n⚠️ **Note:** {} engine(s) did not respond (may affect completeness)\n", extras.unresponsive_engines.len()));
                         }
-                        
+
                         text
                     };
-                    
+
                     Ok(Json(McpCallResponse {
                         content: vec![McpContent {
                             content_type: "text".to_string(),
@@ -324,7 +343,8 @@ pub async fn call_tool(
         }
         "scrape_url" => {
             // Extract URL from arguments
-            let url = request.arguments
+            let url = request
+                .arguments
                 .get("url")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
@@ -335,32 +355,39 @@ pub async fn call_tool(
                         }),
                     )
                 })?;
-            
+
             // Perform scraping - only Rust-native path
             match scrape::scrape_url(&state, url).await {
                 Ok(mut content) => {
-                    let max_chars = request.arguments
+                    let max_chars = request
+                        .arguments
                         .get("max_chars")
                         .and_then(|v| v.as_u64())
                         .map(|n| n as usize)
-                        .or_else(|| std::env::var("MAX_CONTENT_CHARS").ok().and_then(|s| s.parse().ok()))
+                        .or_else(|| {
+                            std::env::var("MAX_CONTENT_CHARS")
+                                .ok()
+                                .and_then(|s| s.parse().ok())
+                        })
                         .unwrap_or(10000);
-                    
+
                     // Set truncation metadata (Priority 1)
                     content.actual_chars = content.clean_content.len();
                     content.max_chars_limit = Some(max_chars);
                     content.truncated = content.clean_content.len() > max_chars;
-                    
+
                     if content.truncated {
                         push_warning_unique(&mut content.warnings, "content_truncated");
                     }
                     maybe_add_raw_url_warning(url, &mut content.warnings);
-                    let short_content_threshold = request.arguments
+                    let short_content_threshold = request
+                        .arguments
                         .get("short_content_threshold")
                         .and_then(|v| v.as_u64())
                         .map(|n| n as usize)
                         .unwrap_or(50);
-                    let extraction_score_threshold = request.arguments
+                    let extraction_score_threshold = request
+                        .arguments
                         .get("extraction_score_threshold")
                         .and_then(|v| v.as_f64())
                         .unwrap_or(0.4);
@@ -368,18 +395,24 @@ pub async fn call_tool(
                     if content.word_count < short_content_threshold {
                         push_warning_unique(&mut content.warnings, "short_content");
                     }
-                    if content.extraction_score.map(|s| s < extraction_score_threshold).unwrap_or(false) {
+                    if content
+                        .extraction_score
+                        .map(|s| s < extraction_score_threshold)
+                        .unwrap_or(false)
+                    {
                         push_warning_unique(&mut content.warnings, "low_extraction_score");
                     }
-                    
+
                     // Check for output_format parameter (Priority 1)
-                    let output_format = request.arguments
+                    let output_format = request
+                        .arguments
                         .get("output_format")
                         .and_then(|v| v.as_str())
                         .unwrap_or("text");
-                    
+
                     if output_format == "json" {
-                        let max_images = request.arguments
+                        let max_images = request
+                            .arguments
                             .get("max_images")
                             .and_then(|v| v.as_u64())
                             .map(|n| n as usize)
@@ -389,8 +422,9 @@ pub async fn call_tool(
                         }
 
                         // Return JSON format directly as text (capped total payload size)
-                        let json_str = serde_json::to_string_pretty(&content)
-                            .unwrap_or_else(|e| format!(r#"{{"error": "Failed to serialize: {}"}}"#, e));
+                        let json_str = serde_json::to_string_pretty(&content).unwrap_or_else(|e| {
+                            format!(r#"{{"error": "Failed to serialize: {}"}}"#, e)
+                        });
                         let capped = cap_json_payload(json_str, max_chars);
                         return Ok(Json(McpCallResponse {
                             content: vec![McpContent {
@@ -400,7 +434,7 @@ pub async fn call_tool(
                             is_error: false,
                         }));
                     }
-                    
+
                     // Otherwise return formatted text (backward compatible)
                     let content_text = {
                         let content_preview = if content.clean_content.is_empty() {
@@ -414,7 +448,11 @@ pub async fn call_tool(
                                 content.clean_content.chars().take(max_chars).collect::<String>(),
                                 content.word_count)
                         } else {
-                            let preview = content.clean_content.chars().take(max_chars).collect::<String>();
+                            let preview = content
+                                .clean_content
+                                .chars()
+                                .take(max_chars)
+                                .collect::<String>();
                             if content.clean_content.len() > max_chars {
                                 format!("{}\n\n[Content truncated: {}/{} chars shown. Increase max_chars parameter to see more]",
                                     preview, max_chars, content.clean_content.len())
@@ -422,51 +460,66 @@ pub async fn call_tool(
                                 preview
                             }
                         };
-                        
-                        let max_headings = request.arguments
+
+                        let max_headings = request
+                            .arguments
                             .get("max_headings")
                             .and_then(|v| v.as_u64())
                             .map(|n| n as usize)
                             .unwrap_or(10);
-                        let max_images = request.arguments
+                        let max_images = request
+                            .arguments
                             .get("max_images")
                             .and_then(|v| v.as_u64())
                             .map(|n| n as usize)
                             .unwrap_or(content.images.len());
 
-                        let headings = content.headings.iter()
+                        let headings = content
+                            .headings
+                            .iter()
                             .take(max_headings)
                             .map(|h| format!("- {} {}", h.level.to_uppercase(), h.text))
                             .collect::<Vec<_>>()
                             .join("\n");
-                        
+
                         // Build Sources section from links
                         let sources_section = if content.links.is_empty() {
                             String::new()
                         } else {
                             let mut sources = String::from("\n\nSources:\n");
                             // Get max_links from args or env var or default
-                            let max_sources = request.arguments
+                            let max_sources = request
+                                .arguments
                                 .get("max_links")
                                 .and_then(|v| v.as_u64())
                                 .map(|n| n as usize)
-                                .or_else(|| std::env::var("MAX_LINKS").ok().and_then(|s| s.parse().ok()))
+                                .or_else(|| {
+                                    std::env::var("MAX_LINKS").ok().and_then(|s| s.parse().ok())
+                                })
                                 .unwrap_or(100);
                             let link_count = content.links.len();
                             for (i, link) in content.links.iter().take(max_sources).enumerate() {
                                 if !link.text.is_empty() {
-                                    sources.push_str(&format!("[{}]: {} ({})", i + 1, link.url, link.text));
+                                    sources.push_str(&format!(
+                                        "[{}]: {} ({})",
+                                        i + 1,
+                                        link.url,
+                                        link.text
+                                    ));
                                 } else {
                                     sources.push_str(&format!("[{}]: {}", i + 1, link.url));
                                 }
                                 sources.push('\n');
                             }
                             if link_count > max_sources {
-                                sources.push_str(&format!("\n(Showing {} of {} total links)\n", max_sources, link_count));
+                                sources.push_str(&format!(
+                                    "\n(Showing {} of {} total links)\n",
+                                    max_sources, link_count
+                                ));
                             }
                             sources
                         };
-                        
+
                         format!(
                             "{}\nURL: {}\nCanonical: {}\nWord Count: {} ({}m)\nLanguage: {}\nSite: {}\nAuthor: {}\nPublished: {}\n\nDescription: {}\nOG Image: {}\n\nHeadings:\n{}\n\nLinks: {}  Images: {}\n\nPreview:\n{}{}",
                             content.title,
@@ -487,7 +540,7 @@ pub async fn call_tool(
                             sources_section
                         )
                     };
-                    
+
                     Ok(Json(McpCallResponse {
                         content: vec![McpContent {
                             content_type: "text".to_string(),

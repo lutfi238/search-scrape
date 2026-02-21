@@ -2284,7 +2284,10 @@ mod tests {
         McpService::push_warning_unique(&mut warnings, "short_content");
 
         assert_eq!(
-            warnings.iter().filter(|w| w.as_str() == "short_content").count(),
+            warnings
+                .iter()
+                .filter(|w| w.as_str() == "short_content")
+                .count(),
             1,
             "push_warning_unique should not duplicate existing warnings"
         );

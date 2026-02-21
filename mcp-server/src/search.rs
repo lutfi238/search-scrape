@@ -1,6 +1,6 @@
+use crate::query_rewriter::{QueryRewriteResult, QueryRewriter};
 use crate::types::*;
 use crate::AppState;
-use crate::query_rewriter::{QueryRewriter, QueryRewriteResult};
 use anyhow::{anyhow, Result};
 use backoff::future::retry;
 use backoff::ExponentialBackoffBuilder;
@@ -10,12 +10,12 @@ use tracing::{debug, info, warn};
 
 #[derive(Debug, Default, Clone)]
 pub struct SearchParamOverrides {
-    pub engines: Option<String>,       // comma-separated list
-    pub categories: Option<String>,    // comma-separated list
-    pub language: Option<String>,      // e.g., "en" or "en-US"
-    pub safesearch: Option<u8>,        // 0,1,2
-    pub time_range: Option<String>,    // e.g., day, week, month, year
-    pub pageno: Option<u32>,           // 1..N
+    pub engines: Option<String>,    // comma-separated list
+    pub categories: Option<String>, // comma-separated list
+    pub language: Option<String>,   // e.g., "en" or "en-US"
+    pub safesearch: Option<u8>,     // 0,1,2
+    pub time_range: Option<String>, // e.g., day, week, month, year
+    pub pageno: Option<u32>,        // 1..N
 }
 
 #[derive(Debug, Default, Clone)]
@@ -28,7 +28,10 @@ pub struct SearchExtras {
     pub duplicate_warning: Option<String>,
 }
 
-pub async fn search_web(state: &Arc<AppState>, query: &str) -> Result<(Vec<SearchResult>, SearchExtras)> {
+pub async fn search_web(
+    state: &Arc<AppState>,
+    query: &str,
+) -> Result<(Vec<SearchResult>, SearchExtras)> {
     search_web_with_params(state, query, None).await
 }
 
@@ -38,7 +41,7 @@ pub async fn search_web_with_params(
     overrides: Option<SearchParamOverrides>,
 ) -> Result<(Vec<SearchResult>, SearchExtras)> {
     info!("Searching for: {}", query);
-    
+
     // Phase 2: Check for recent duplicates if memory enabled
     let mut duplicate_warning = None;
     if let Some(memory) = &state.memory {
@@ -47,35 +50,46 @@ pub async fn search_web_with_params(
                 let time_ago = chrono::Utc::now().signed_duration_since(entry.timestamp);
                 let hours = time_ago.num_hours();
                 let minutes = time_ago.num_minutes();
-                
+
                 let time_str = if hours > 0 {
                     format!("{} hour{} ago", hours, if hours == 1 { "" } else { "s" })
                 } else {
-                    format!("{} minute{} ago", minutes, if minutes == 1 { "" } else { "s" })
+                    format!(
+                        "{} minute{} ago",
+                        minutes,
+                        if minutes == 1 { "" } else { "s" }
+                    )
                 };
-                
+
                 duplicate_warning = Some(format!(
                     "⚠️ Similar search found from {} (similarity: {:.2}). Consider checking history first.",
                     time_str, score
                 ));
-                warn!("Duplicate search detected: {} ({} ago)", entry.query, time_str);
+                warn!(
+                    "Duplicate search detected: {} ({} ago)",
+                    entry.query, time_str
+                );
             }
             Ok(None) => {}
             Err(e) => warn!("Failed to check for duplicates: {}", e),
         }
     }
-    
+
     // Phase 2: Query rewriting for developer queries
     let rewriter = QueryRewriter::new();
     let rewrite_result = rewriter.rewrite_query(query);
-    
+
     let effective_query = if rewrite_result.was_rewritten() {
-        info!("Query rewritten: '{}' -> '{}'", query, rewrite_result.best_query());
+        info!(
+            "Query rewritten: '{}' -> '{}'",
+            query,
+            rewrite_result.best_query()
+        );
         rewrite_result.best_query()
     } else {
         query
     };
-    
+
     let cache_key = if let Some(ref ov) = overrides {
         format!(
             "q={}|eng={}|cat={}|lang={}|safe={}|time={}|page={}",
@@ -85,7 +99,9 @@ pub async fn search_web_with_params(
             ov.language.clone().unwrap_or_default(),
             ov.safesearch.map(|v| v.to_string()).unwrap_or_default(),
             ov.time_range.clone().unwrap_or_default(),
-            ov.pageno.map(|v| v.to_string()).unwrap_or_else(|| "1".into())
+            ov.pageno
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "1".into())
         )
     } else {
         format!("q={}|default", query)
@@ -104,10 +120,15 @@ pub async fn search_web_with_params(
         return Ok((cached, cached_extras));
     }
 
-    let _permit = state.outbound_limit.acquire().await.expect("semaphore closed");
+    let _permit = state
+        .outbound_limit
+        .acquire()
+        .await
+        .expect("semaphore closed");
     let mut params: HashMap<String, String> = HashMap::new();
-    let engines = std::env::var("SEARXNG_ENGINES").unwrap_or_else(|_| "duckduckgo,google,bing".to_string());
-    
+    let engines =
+        std::env::var("SEARXNG_ENGINES").unwrap_or_else(|_| "duckduckgo,google,bing".to_string());
+
     // Use effective query (rewritten or original)
     params.insert("q".into(), effective_query.to_string());
     params.insert("format".into(), "json".into());
@@ -119,17 +140,43 @@ pub async fn search_web_with_params(
     params.insert("pageno".into(), "1".into());
 
     if let Some(ov) = overrides {
-    if let Some(v) = ov.engines { if !v.is_empty() { params.insert("engines".into(), v); } }
-    if let Some(v) = ov.categories { if !v.is_empty() { params.insert("categories".into(), v); } }
-    if let Some(v) = ov.language { if !v.is_empty() { params.insert("language".into(), v); } }
-    if let Some(v) = ov.time_range { params.insert("time_range".into(), v); }
-    if let Some(v) = ov.safesearch { params.insert("safesearch".into(), match v { 0 => "0".into(), 1 => "1".into(), 2 => "2".into(), _ => "0".into() }); }
-    if let Some(v) = ov.pageno { params.insert("pageno".into(), v.to_string()); }
+        if let Some(v) = ov.engines {
+            if !v.is_empty() {
+                params.insert("engines".into(), v);
+            }
+        }
+        if let Some(v) = ov.categories {
+            if !v.is_empty() {
+                params.insert("categories".into(), v);
+            }
+        }
+        if let Some(v) = ov.language {
+            if !v.is_empty() {
+                params.insert("language".into(), v);
+            }
+        }
+        if let Some(v) = ov.time_range {
+            params.insert("time_range".into(), v);
+        }
+        if let Some(v) = ov.safesearch {
+            params.insert(
+                "safesearch".into(),
+                match v {
+                    0 => "0".into(),
+                    1 => "1".into(),
+                    2 => "2".into(),
+                    _ => "0".into(),
+                },
+            );
+        }
+        if let Some(v) = ov.pageno {
+            params.insert("pageno".into(), v.to_string());
+        }
     }
-    
+
     let search_url = format!("{}/search", state.searxng_url);
     debug!("Search URL: {}", search_url);
-    
+
     let client = state.http_client.clone();
     let search_url_owned = search_url.clone();
     let params_cloned = params.clone();
@@ -147,7 +194,9 @@ pub async fn search_web_with_params(
                 .header("Accept", "application/json")
                 .send()
                 .await
-                .map_err(|e| backoff::Error::transient(anyhow!("Failed to send request to SearXNG: {}", e)))?;
+                .map_err(|e| {
+                    backoff::Error::transient(anyhow!("Failed to send request to SearXNG: {}", e))
+                })?;
             if !resp.status().is_success() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_else(|_| "".into());
@@ -161,42 +210,52 @@ pub async fn search_web_with_params(
             }
             match resp.json::<SearxngResponse>().await {
                 Ok(parsed) => Ok(parsed),
-                Err(e) => Err(backoff::Error::transient(anyhow!("Failed to parse SearXNG response: {}", e))),
+                Err(e) => Err(backoff::Error::transient(anyhow!(
+                    "Failed to parse SearXNG response: {}",
+                    e
+                ))),
             }
         },
     )
     .await?;
-    
-    info!("SearXNG returned {} results", searxng_response.results.len());
-    
+
+    info!(
+        "SearXNG returned {} results",
+        searxng_response.results.len()
+    );
+
     // Extract extras from SearXNG response
     let extras = SearchExtras {
-        answers: searxng_response.answers
+        answers: searxng_response
+            .answers
             .and_then(|v| v.as_array().cloned())
             .unwrap_or_default()
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
             .collect(),
-        suggestions: searxng_response.suggestions
+        suggestions: searxng_response
+            .suggestions
             .and_then(|v| v.as_array().cloned())
             .unwrap_or_default()
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
             .collect(),
-        corrections: searxng_response.corrections
+        corrections: searxng_response
+            .corrections
             .and_then(|v| v.as_array().cloned())
             .unwrap_or_default()
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
             .collect(),
-        unresponsive_engines: searxng_response.unresponsive_engines
+        unresponsive_engines: searxng_response
+            .unresponsive_engines
             .and_then(|v| v.as_object().cloned())
             .map(|obj| obj.keys().cloned().collect())
             .unwrap_or_default(),
         query_rewrite: Some(rewrite_result),
         duplicate_warning,
     };
-    
+
     // Convert to our format with enhanced metadata (Priority 2)
     let mut seen = std::collections::HashSet::new();
     let mut results: Vec<SearchResult> = Vec::new();
@@ -214,20 +273,23 @@ pub async fn search_web_with_params(
             });
         }
     }
-    
+
     debug!("Converted {} results", results.len());
     // Fill cache with composite key
     state.search_cache.insert(cache_key, results.clone()).await;
-    
+
     // Auto-log to history if memory is enabled (Phase 1)
     if let Some(memory) = &state.memory {
         let result_json = serde_json::to_value(&results).unwrap_or_default();
-        
-        if let Err(e) = memory.log_search(query.to_string(), &result_json, results.len()).await {
+
+        if let Err(e) = memory
+            .log_search(query.to_string(), &result_json, results.len())
+            .await
+        {
             tracing::warn!("Failed to log search to history: {}", e);
         }
     }
-    
+
     Ok((results, extras))
 }
 
@@ -237,12 +299,12 @@ fn classify_search_result(url_str: &str) -> (Option<String>, String) {
     let domain = url::Url::parse(url_str)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_string()));
-    
+
     let source_type = if let Some(ref d) = domain {
         let d_lower = d.to_lowercase();
-        
+
         // Documentation sites
-        if d_lower.ends_with(".github.io") 
+        if d_lower.ends_with(".github.io")
             || d_lower.contains("docs.rs")
             || d_lower.contains("readthedocs")
             || d_lower.contains("rust-lang.org")
@@ -274,15 +336,11 @@ fn classify_search_result(url_str: &str) -> (Option<String>, String) {
             "blog".to_string()
         }
         // Video platforms
-        else if d_lower.contains("youtube.com")
-            || d_lower.contains("vimeo.com")
-        {
+        else if d_lower.contains("youtube.com") || d_lower.contains("vimeo.com") {
             "video".to_string()
         }
         // Q&A sites
-        else if d_lower.contains("stackoverflow.com")
-            || d_lower.contains("stackexchange.com")
-        {
+        else if d_lower.contains("stackoverflow.com") || d_lower.contains("stackexchange.com") {
             "qa".to_string()
         }
         // Package registries
@@ -298,14 +356,13 @@ fn classify_search_result(url_str: &str) -> (Option<String>, String) {
             || d_lower.contains("game")
         {
             "gaming".to_string()
-        }
-        else {
+        } else {
             "other".to_string()
         }
     } else {
         "other".to_string()
     };
-    
+
     (domain, source_type)
 }
 
@@ -313,7 +370,7 @@ fn classify_search_result(url_str: &str) -> (Option<String>, String) {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    
+
     #[tokio::test]
     async fn test_search_web() {
         // This test requires a running SearXNG instance
@@ -321,14 +378,14 @@ mod tests {
         if std::env::var("CI").is_ok() {
             return;
         }
-        
+
         let state = Arc::new(AppState::new(
             "http://localhost:8888".to_string(),
             reqwest::Client::new(),
         ));
-        
+
         let results = search_web(&state, "rust programming language").await;
-        
+
         match results {
             Ok((results, _extras)) => {
                 assert!(!results.is_empty(), "Should return some results");
@@ -339,7 +396,10 @@ mod tests {
             }
             Err(e) => {
                 // If SearXNG is not running, this is expected
-                println!("Search test failed (expected if SearXNG not running): {}", e);
+                println!(
+                    "Search test failed (expected if SearXNG not running): {}",
+                    e
+                );
             }
         }
     }

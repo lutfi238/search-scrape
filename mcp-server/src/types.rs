@@ -219,7 +219,7 @@ pub struct ExtractField {
     pub name: String,
     pub description: String,
     #[serde(default)]
-    pub field_type: Option<String>,  // string, number, boolean, array, object
+    pub field_type: Option<String>, // string, number, boolean, array, object
     #[serde(default)]
     pub required: Option<bool>,
 }
@@ -396,11 +396,26 @@ mod tests {
 
     #[test]
     fn test_crawl_job_status_all_variants() {
-        assert_eq!(serde_json::to_string(&CrawlJobStatus::Queued).unwrap(), "\"queued\"");
-        assert_eq!(serde_json::to_string(&CrawlJobStatus::Running).unwrap(), "\"running\"");
-        assert_eq!(serde_json::to_string(&CrawlJobStatus::Completed).unwrap(), "\"completed\"");
-        assert_eq!(serde_json::to_string(&CrawlJobStatus::Failed).unwrap(), "\"failed\"");
-        assert_eq!(serde_json::to_string(&CrawlJobStatus::Expired).unwrap(), "\"expired\"");
+        assert_eq!(
+            serde_json::to_string(&CrawlJobStatus::Queued).unwrap(),
+            "\"queued\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CrawlJobStatus::Running).unwrap(),
+            "\"running\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CrawlJobStatus::Completed).unwrap(),
+            "\"completed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CrawlJobStatus::Failed).unwrap(),
+            "\"failed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CrawlJobStatus::Expired).unwrap(),
+            "\"expired\""
+        );
     }
 
     #[test]
@@ -497,7 +512,8 @@ mod tests {
 
     #[test]
     fn test_llm_config_minimal() {
-        let json = r#"{"base_url":"http://localhost:11434/v1","api_key":"ollama","model":"llama3"}"#;
+        let json =
+            r#"{"base_url":"http://localhost:11434/v1","api_key":"ollama","model":"llama3"}"#;
         let config: LlmConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.base_url, "http://localhost:11434/v1");
         assert_eq!(config.model, "llama3");
@@ -521,9 +537,15 @@ mod tests {
         let deserialized: ToolErrorEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.code, "CRAWL_FAILED");
         assert_eq!(deserialized.message, "Connection timed out");
-        assert_eq!(deserialized.details.as_deref(), Some("TCP timeout after 30s"));
+        assert_eq!(
+            deserialized.details.as_deref(),
+            Some("TCP timeout after 30s")
+        );
         assert!(deserialized.retryable);
-        assert_eq!(deserialized.request_id_or_job_id.as_deref(), Some("job-xyz-789"));
+        assert_eq!(
+            deserialized.request_id_or_job_id.as_deref(),
+            Some("job-xyz-789")
+        );
     }
 
     #[test]

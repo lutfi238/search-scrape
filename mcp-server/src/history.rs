@@ -68,19 +68,28 @@ impl MemoryManager {
             .any(|c| c.name == self.collection_name);
 
         if !exists {
-            tracing::info!("Creating Qdrant collection: {} with hybrid search support (full-text + vector)", self.collection_name);
+            tracing::info!(
+                "Creating Qdrant collection: {} with hybrid search support (full-text + vector)",
+                self.collection_name
+            );
 
             // Create collection with 384-dimensional vectors (fastembed default)
-            let create_collection = qdrant_client::qdrant::CreateCollectionBuilder::new(&self.collection_name)
-                .vectors_config(qdrant_client::qdrant::VectorParamsBuilder::new(384, qdrant_client::qdrant::Distance::Cosine))
-                .build();
+            let create_collection =
+                qdrant_client::qdrant::CreateCollectionBuilder::new(&self.collection_name)
+                    .vectors_config(qdrant_client::qdrant::VectorParamsBuilder::new(
+                        384,
+                        qdrant_client::qdrant::Distance::Cosine,
+                    ))
+                    .build();
 
             self.qdrant
                 .create_collection(create_collection)
                 .await
                 .context("Failed to create collection")?;
-            
-            tracing::info!("Hybrid search collection created (Qdrant will auto-index text fields for BM25)");
+
+            tracing::info!(
+                "Hybrid search collection created (Qdrant will auto-index text fields for BM25)"
+            );
         }
 
         Ok(())
@@ -93,10 +102,10 @@ impl MemoryManager {
                 tracing::info!("Initializing fastembed model...");
                 tracing::info!("HOME dir: {:?}", std::env::var("HOME"));
                 tracing::info!("Cache dir: {:?}", std::env::var("HF_HOME"));
-                
+
                 match TextEmbedding::try_new(
                     InitOptions::new(EmbeddingModel::AllMiniLML6V2)
-                        .with_show_download_progress(true)
+                        .with_show_download_progress(true),
                 ) {
                     Ok(model) => {
                         tracing::info!("Fastembed model initialized successfully!");
@@ -105,7 +114,10 @@ impl MemoryManager {
                     Err(e) => {
                         tracing::error!("Fastembed initialization failed: {:?}", e);
                         tracing::error!("Error details: {}", e);
-                        Err(anyhow::anyhow!("Failed to initialize embedding model: {}", e))
+                        Err(anyhow::anyhow!(
+                            "Failed to initialize embedding model: {}",
+                            e
+                        ))
                     }
                 }
             })
@@ -156,11 +168,7 @@ impl MemoryManager {
             .context("Failed to convert to Payload")?;
 
         // Create point for Qdrant
-        let point = qdrant_client::qdrant::PointStruct::new(
-            entry.id.clone(),
-            embedding,
-            payload,
-        );
+        let point = qdrant_client::qdrant::PointStruct::new(entry.id.clone(), embedding, payload);
 
         // Upsert point using builder pattern
         use qdrant_client::qdrant::UpsertPointsBuilder;
@@ -225,7 +233,7 @@ impl MemoryManager {
         // Parse results and apply keyword boosting for better agent results
         let query_lower = query.to_lowercase();
         let query_keywords: Vec<&str> = query_lower.split_whitespace().collect();
-        
+
         let mut entries: Vec<(HistoryEntry, f32)> = results
             .result
             .into_iter()
@@ -234,27 +242,28 @@ impl MemoryManager {
                 let payload = point.payload;
                 let value = serde_json::to_value(&payload).ok()?;
                 let entry: HistoryEntry = serde_json::from_value(value).ok()?;
-                
+
                 // Boost score if exact keywords match (hybrid approach)
-                let entry_text = format!("{} {} {}", 
-                    entry.query.to_lowercase(), 
+                let entry_text = format!(
+                    "{} {} {}",
+                    entry.query.to_lowercase(),
                     entry.summary.to_lowercase(),
                     entry.topic.to_lowercase()
                 );
-                
+
                 let mut keyword_matches = 0;
                 for keyword in &query_keywords {
                     if entry_text.contains(keyword) {
                         keyword_matches += 1;
                     }
                 }
-                
+
                 // Boost score based on keyword matches (up to +15%)
                 if keyword_matches > 0 {
                     let boost = (keyword_matches as f32 / query_keywords.len() as f32) * 0.15;
                     score = (score + boost).min(1.0);
                 }
-                
+
                 Some((entry, score))
             })
             .collect();
@@ -374,9 +383,7 @@ impl MemoryManager {
         use std::collections::HashMap;
 
         // Search all entries
-        let results = self
-            .search_history("", 1000, 0.0, None)
-            .await?;
+        let results = self.search_history("", 1000, 0.0, None).await?;
 
         let mut domain_counts: HashMap<String, usize> = HashMap::new();
 

@@ -1,14 +1,14 @@
+use crate::rust_scraper::RustScraper;
 use crate::types::*;
 use crate::AppState;
 use anyhow::{anyhow, Result};
 use backoff::future::retry;
 use backoff::ExponentialBackoffBuilder;
+use futures::stream::{self, StreamExt};
+use select::predicate::Predicate;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
-use select::predicate::Predicate;
-use crate::rust_scraper::RustScraper;
-use futures::stream::{self, StreamExt};
 
 /// Rewrite GitHub blob URLs to raw.githubusercontent.com for clean content fetch.
 /// Returns `Some(rewritten_url)` for blob URLs, `None` for all other URLs.
@@ -34,15 +34,15 @@ fn rewrite_url_for_clean_content(url: &str) -> Option<String> {
     // (This is implicitly satisfied by guard 1, but kept for clarity.)
 
     // Build the raw URL: swap host, drop "/blob" from the path segment.
-    let repo_path = &path[..blob_pos];          // e.g. "/microsoft/vscode"
+    let repo_path = &path[..blob_pos]; // e.g. "/microsoft/vscode"
     let after_blob = &path[blob_pos + "/blob".len()..]; // e.g. "/main/README.md"
 
     // Preserve query and fragment if present (unlikely for blob URLs, but safe).
     let query_frag = match (parsed.query(), parsed.fragment()) {
         (Some(q), Some(f)) => format!("?{}#{}", q, f),
-        (Some(q), None)    => format!("?{}", q),
-        (None,    Some(f)) => format!("#{}", f),
-        (None,    None)    => String::new(),
+        (Some(q), None) => format!("?{}", q),
+        (None, Some(f)) => format!("#{}", f),
+        (None, None) => String::new(),
     };
 
     Some(format!(
@@ -76,7 +76,11 @@ pub async fn scrape_url(state: &Arc<AppState>, url: &str) -> Result<ScrapeRespon
     }
 
     // Concurrency control
-    let _permit = state.outbound_limit.acquire().await.expect("semaphore closed");
+    let _permit = state
+        .outbound_limit
+        .acquire()
+        .await
+        .expect("semaphore closed");
 
     // Only use Rust-native scraper with retries
     let rust_scraper = RustScraper::new();
@@ -96,9 +100,13 @@ pub async fn scrape_url(state: &Arc<AppState>, url: &str) -> Result<ScrapeRespon
                 }
             }
         },
-    ).await?;
+    )
+    .await?;
     if result.word_count == 0 || result.clean_content.trim().is_empty() {
-        info!("Rust-native scraper returned empty content, using fallback for {}", url);
+        info!(
+            "Rust-native scraper returned empty content, using fallback for {}",
+            url
+        );
         result = scrape_url_fallback(state, &fetch_url).await?;
     } else {
         info!("Rust-native scraper succeeded for {}", url);
@@ -108,8 +116,11 @@ pub async fn scrape_url(state: &Arc<AppState>, url: &str) -> Result<ScrapeRespon
     // even when we internally fetch via rewritten raw.githubusercontent.com URL.
     result.url = url_owned.clone();
 
-    state.scrape_cache.insert(url_owned.clone(), result.clone()).await;
-    
+    state
+        .scrape_cache
+        .insert(url_owned.clone(), result.clone())
+        .await;
+
     // Auto-log to history if memory is enabled (Phase 1)
     if let Some(memory) = &state.memory {
         let summary = format!(
@@ -117,32 +128,35 @@ pub async fn scrape_url(state: &Arc<AppState>, url: &str) -> Result<ScrapeRespon
             result.word_count,
             result.code_blocks.len()
         );
-        
+
         // Extract domain from URL
         let domain = url::Url::parse(url)
             .ok()
             .and_then(|u| u.host_str().map(|s| s.to_string()));
-        
+
         let result_json = serde_json::to_value(&result).unwrap_or_default();
-        
-        if let Err(e) = memory.log_scrape(
-            url.to_string(),
-            Some(result.title.clone()),
-            summary,
-            domain,
-            &result_json
-        ).await {
+
+        if let Err(e) = memory
+            .log_scrape(
+                url.to_string(),
+                Some(result.title.clone()),
+                summary,
+                domain,
+                &result_json,
+            )
+            .await
+        {
             tracing::warn!("Failed to log scrape to history: {}", e);
         }
     }
-    
+
     Ok(result)
 }
 
 // Fallback scraper using direct HTTP request (legacy simple mode) -- optional; keeping for troubleshooting
 pub async fn scrape_url_fallback(state: &Arc<AppState>, url: &str) -> Result<ScrapeResponse> {
     info!("Using fallback scraper for: {}", url);
-    
+
     // Make direct HTTP request
     let response = state
         .http_client
@@ -151,7 +165,7 @@ pub async fn scrape_url_fallback(state: &Arc<AppState>, url: &str) -> Result<Scr
         .send()
         .await
         .map_err(|e| anyhow!("Failed to fetch URL: {}", e))?;
-    
+
     let status_code = response.status().as_u16();
     let content_type = response
         .headers()
@@ -159,56 +173,58 @@ pub async fn scrape_url_fallback(state: &Arc<AppState>, url: &str) -> Result<Scr
         .and_then(|v| v.to_str().ok())
         .unwrap_or("text/html")
         .to_string();
-    
+
     let html = response
         .text()
         .await
         .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
-    
+
     let document = select::document::Document::from(html.as_str());
-    
+
     let title = document
         .find(select::predicate::Name("title"))
         .next()
         .map(|n| n.text())
         .unwrap_or_else(|| "No Title".to_string());
-    
+
     let meta_description = document
         .find(select::predicate::Attr("name", "description"))
         .next()
         .and_then(|n| n.attr("content"))
         .unwrap_or("")
         .to_string();
-    
+
     let meta_keywords = document
         .find(select::predicate::Attr("name", "keywords"))
         .next()
         .and_then(|n| n.attr("content"))
         .unwrap_or("")
         .to_string();
-    
+
     let body_html = document
         .find(select::predicate::Name("body"))
         .next()
         .map(|n| n.html())
         .unwrap_or_else(|| html.clone());
-    
+
     let clean_content = html2text::from_read(body_html.as_bytes(), 80);
     let word_count = clean_content.split_whitespace().count();
-    
+
     let headings: Vec<Heading> = document
-        .find(select::predicate::Name("h1")
-            .or(select::predicate::Name("h2"))
-            .or(select::predicate::Name("h3"))
-            .or(select::predicate::Name("h4"))
-            .or(select::predicate::Name("h5"))
-            .or(select::predicate::Name("h6")))
+        .find(
+            select::predicate::Name("h1")
+                .or(select::predicate::Name("h2"))
+                .or(select::predicate::Name("h3"))
+                .or(select::predicate::Name("h4"))
+                .or(select::predicate::Name("h5"))
+                .or(select::predicate::Name("h6")),
+        )
         .map(|n| Heading {
             level: n.name().unwrap_or("h1").to_string(),
             text: n.text(),
         })
         .collect();
-    
+
     let links: Vec<Link> = document
         .find(select::predicate::Name("a"))
         .filter_map(|n| {
@@ -218,7 +234,7 @@ pub async fn scrape_url_fallback(state: &Arc<AppState>, url: &str) -> Result<Scr
             })
         })
         .collect();
-    
+
     let images: Vec<Image> = document
         .find(select::predicate::Name("img"))
         .filter_map(|n| {
@@ -229,7 +245,7 @@ pub async fn scrape_url_fallback(state: &Arc<AppState>, url: &str) -> Result<Scr
             })
         })
         .collect();
-    
+
     let result = ScrapeResponse {
         url: url.to_string(),
         title,
@@ -260,9 +276,11 @@ pub async fn scrape_url_fallback(state: &Arc<AppState>, url: &str) -> Result<Scr
         max_chars_limit: None,
         extraction_score: Some(0.3), // Lower score for fallback
         warnings: vec!["fallback_scraper_used".to_string()],
-        domain: url::Url::parse(url).ok().and_then(|u| u.host_str().map(|h| h.to_string())),
+        domain: url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_string())),
     };
-    
+
     info!("Fallback scraper extracted {} words", result.word_count);
     Ok(result)
 }
@@ -282,7 +300,10 @@ pub async fn scrape_batch(
     let concurrency = max_concurrent.unwrap_or(10).min(50);
     let max_chars = max_chars.unwrap_or(10000);
 
-    info!("Starting batch scrape of {} URLs with concurrency {}", total, concurrency);
+    info!(
+        "Starting batch scrape of {} URLs with concurrency {}",
+        total, concurrency
+    );
 
     // Process URLs concurrently using buffered stream
     let state_clone = Arc::clone(state);
@@ -301,7 +322,8 @@ pub async fn scrape_batch(
                         data.truncated = data.clean_content.len() > max_chars;
 
                         if data.truncated {
-                            data.clean_content = data.clean_content.chars().take(max_chars).collect();
+                            data.clean_content =
+                                data.clean_content.chars().take(max_chars).collect();
                             if !data.warnings.contains(&"content_truncated".to_string()) {
                                 data.warnings.push("content_truncated".to_string());
                             }
@@ -315,15 +337,13 @@ pub async fn scrape_batch(
                             duration_ms: url_start.elapsed().as_millis() as u64,
                         }
                     }
-                    Err(e) => {
-                        ScrapeBatchResult {
-                            url: url_clone,
-                            success: false,
-                            data: None,
-                            error: Some(e.to_string()),
-                            duration_ms: url_start.elapsed().as_millis() as u64,
-                        }
-                    }
+                    Err(e) => ScrapeBatchResult {
+                        url: url_clone,
+                        success: false,
+                        data: None,
+                        error: Some(e.to_string()),
+                        duration_ms: url_start.elapsed().as_millis() as u64,
+                    },
                 }
             }
         })
@@ -368,7 +388,10 @@ mod tests {
     fn test_rewrite_url_for_clean_content_non_blob_is_none() {
         assert!(rewrite_url_for_clean_content("https://github.com/user/repo").is_none());
         assert!(rewrite_url_for_clean_content("https://github.com/user/repo/issues/1").is_none());
-        assert!(rewrite_url_for_clean_content("https://raw.githubusercontent.com/user/repo/main/a.rs").is_none());
+        assert!(rewrite_url_for_clean_content(
+            "https://raw.githubusercontent.com/user/repo/main/a.rs"
+        )
+        .is_none());
     }
 
     /// A host that merely contains "github.com" as a substring (e.g. "notgithub.com") must NOT be rewritten.
@@ -416,9 +439,15 @@ mod tests {
     fn test_rewrite_returns_raw_url_while_original_is_separate() {
         let original = "https://github.com/rust-lang/rust/blob/master/src/lib.rs";
         let rewritten = rewrite_url_for_clean_content(original);
-        assert!(rewritten.is_some(), "should produce a rewritten URL for valid blob path");
+        assert!(
+            rewritten.is_some(),
+            "should produce a rewritten URL for valid blob path"
+        );
         let rw = rewritten.unwrap();
-        assert!(rw.contains("raw.githubusercontent.com"), "rewritten URL must use raw host");
+        assert!(
+            rw.contains("raw.githubusercontent.com"),
+            "rewritten URL must use raw host"
+        );
         // The original URL must not equal the rewritten URL
         assert_ne!(rw, original, "rewritten URL must differ from original");
     }
@@ -429,13 +458,16 @@ mod tests {
             "http://localhost:8888".to_string(),
             reqwest::Client::new(),
         ));
-        
+
         let result = scrape_url_fallback(&state, "https://httpbin.org/html").await;
-        
+
         match result {
             Ok(content) => {
                 assert!(!content.title.is_empty(), "Title should not be empty");
-                assert!(!content.clean_content.is_empty(), "Content should not be empty");
+                assert!(
+                    !content.clean_content.is_empty(),
+                    "Content should not be empty"
+                );
                 assert_eq!(content.status_code, 200, "Status code should be 200");
             }
             Err(e) => {

@@ -9,9 +9,9 @@ use std::env;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
-use mcp_server::{search, scrape, types::*, mcp, AppState};
+use mcp_server::{mcp, scrape, search, types::*, AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -21,9 +21,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Get configuration from environment
-    let searxng_url = env::var("SEARXNG_URL")
-        .unwrap_or_else(|_| "http://localhost:8888".to_string());
-    
+    let searxng_url =
+        env::var("SEARXNG_URL").unwrap_or_else(|_| "http://localhost:8888".to_string());
+
     info!("Starting MCP Server");
     info!("SearXNG URL: {}", searxng_url);
 
@@ -44,7 +44,10 @@ async fn main() -> anyhow::Result<()> {
                 info!("Memory initialized successfully");
             }
             Err(e) => {
-                warn!("Failed to initialize memory: {}. Continuing without memory feature.", e);
+                warn!(
+                    "Failed to initialize memory: {}. Continuing without memory feature.",
+                    e
+                );
             }
         }
     } else {
@@ -69,9 +72,9 @@ async fn main() -> anyhow::Result<()> {
     // Start server
     let listener = tokio::net::TcpListener::bind("0.0.0.0:5000").await?;
     info!("MCP Server listening on http://0.0.0.0:5000");
-    
+
     axum::serve(listener, app).await?;
-    
+
     Ok(())
 }
 
@@ -124,7 +127,7 @@ async fn chat_handler(
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, (StatusCode, Json<ErrorResponse>)> {
     info!("Processing chat request: {}", request.query);
-    
+
     // Step 1: Search for relevant URLs
     let search_results = match search::search_web(&state, &request.query).await {
         Ok((results, _extras)) => results,
@@ -138,12 +141,19 @@ async fn chat_handler(
             ));
         }
     };
-    
+
     info!("Found {} search results", search_results.len());
-    
+
     // Step 2: Scrape top results concurrently (limit to 5)
-    let top_n = std::env::var("CHAT_SCRAPE_TOP_N").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(5);
-    let to_scrape: Vec<String> = search_results.iter().take(top_n).map(|r| r.url.clone()).collect();
+    let top_n = std::env::var("CHAT_SCRAPE_TOP_N")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(5);
+    let to_scrape: Vec<String> = search_results
+        .iter()
+        .take(top_n)
+        .map(|r| r.url.clone())
+        .collect();
     let mut scraped_content = Vec::new();
     let mut tasks = Vec::new();
     for url in to_scrape {
@@ -164,7 +174,7 @@ async fn chat_handler(
             Err(e) => warn!("Scrape task join error: {}", e),
         }
     }
-    
+
     // Step 3: Generate response based on scraped content
     let response_text = if scraped_content.is_empty() {
         format!("I found {} search results for '{}', but couldn't scrape any content. Here are the URLs:\n{}", 
@@ -173,22 +183,28 @@ async fn chat_handler(
             search_results.iter().map(|r| format!("- {} ({})", r.title, r.url)).collect::<Vec<_>>().join("\n")
         )
     } else {
-        let content_summary = scraped_content.iter()
-            .map(|c| format!(
-                "• {} ({} words, {}m)\n  {}\n  URL: {}\n",
-                c.title,
-                c.word_count,
-                c.reading_time_minutes.unwrap_or(((c.word_count as f64 / 200.0).ceil() as u32).max(1)),
-                c.meta_description,
-                c.canonical_url.as_ref().unwrap_or(&c.url)
-            ))
+        let content_summary = scraped_content
+            .iter()
+            .map(|c| {
+                format!(
+                    "• {} ({} words, {}m)\n  {}\n  URL: {}\n",
+                    c.title,
+                    c.word_count,
+                    c.reading_time_minutes
+                        .unwrap_or(((c.word_count as f64 / 200.0).ceil() as u32).max(1)),
+                    c.meta_description,
+                    c.canonical_url.as_ref().unwrap_or(&c.url)
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n---\n");
-        
-        format!("Based on my search for '{}', I found the following information:\n\n{}", 
-            request.query, content_summary)
+
+        format!(
+            "Based on my search for '{}', I found the following information:\n\n{}",
+            request.query, content_summary
+        )
     };
-    
+
     Ok(Json(ChatResponse {
         response: response_text,
         search_results,

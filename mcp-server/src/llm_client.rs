@@ -65,13 +65,22 @@ impl LlmClient {
     /// Returns an error containing `LLM_NOT_CONFIGURED` if any required var is missing.
     pub fn from_env() -> Result<Self> {
         let base_url = std::env::var("LLM_BASE_URL").map_err(|_| {
-            anyhow!("{}: LLM_BASE_URL environment variable is required", LLM_NOT_CONFIGURED)
+            anyhow!(
+                "{}: LLM_BASE_URL environment variable is required",
+                LLM_NOT_CONFIGURED
+            )
         })?;
         let api_key = std::env::var("LLM_API_KEY").map_err(|_| {
-            anyhow!("{}: LLM_API_KEY environment variable is required", LLM_NOT_CONFIGURED)
+            anyhow!(
+                "{}: LLM_API_KEY environment variable is required",
+                LLM_NOT_CONFIGURED
+            )
         })?;
         let model = std::env::var("LLM_MODEL").map_err(|_| {
-            anyhow!("{}: LLM_MODEL environment variable is required", LLM_NOT_CONFIGURED)
+            anyhow!(
+                "{}: LLM_MODEL environment variable is required",
+                LLM_NOT_CONFIGURED
+            )
         })?;
 
         let timeout_ms: u64 = std::env::var("LLM_TIMEOUT_MS")
@@ -136,15 +145,8 @@ impl LlmClient {
     /// Send a chat/completions request and return the assistant response text.
     ///
     /// Maps known HTTP failures to typed error codes.
-    pub async fn chat_completion(
-        &self,
-        system_prompt: &str,
-        user_content: &str,
-    ) -> Result<String> {
-        let url = format!(
-            "{}/chat/completions",
-            self.base_url.trim_end_matches('/')
-        );
+    pub async fn chat_completion(&self, system_prompt: &str, user_content: &str) -> Result<String> {
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let payload = self.build_chat_payload(system_prompt, user_content);
 
         let response = self
@@ -157,7 +159,11 @@ impl LlmClient {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    anyhow!("{}: request timed out after {:?}", LLM_TIMEOUT, self.timeout)
+                    anyhow!(
+                        "{}: request timed out after {:?}",
+                        LLM_TIMEOUT,
+                        self.timeout
+                    )
                 } else {
                     anyhow!("LLM request failed: {}", e)
                 }
@@ -187,7 +193,11 @@ impl LlmClient {
         }
 
         let body: Value = response.json().await.map_err(|e| {
-            anyhow!("{}: failed to parse LLM response as JSON: {}", LLM_INVALID_JSON, e)
+            anyhow!(
+                "{}: failed to parse LLM response as JSON: {}",
+                LLM_INVALID_JSON,
+                e
+            )
         })?;
 
         // Extract the assistant message content from OpenAI-compatible response shape:
@@ -226,10 +236,7 @@ impl LlmClient {
             .strip_prefix("```json")
             .or_else(|| trimmed.strip_prefix("```"))
             .unwrap_or(trimmed);
-        let json_str = json_str
-            .strip_suffix("```")
-            .unwrap_or(json_str)
-            .trim();
+        let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
 
         serde_json::from_str(json_str).map_err(|e| {
             anyhow!(
@@ -302,20 +309,28 @@ mod tests {
         assert_eq!(payload["model"], "gpt-4");
 
         // Must have messages array with system + user
-        let messages = payload["messages"].as_array().expect("messages should be array");
+        let messages = payload["messages"]
+            .as_array()
+            .expect("messages should be array");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[1]["role"], "user");
 
         // System message contains the prompt
         assert!(
-            messages[0]["content"].as_str().unwrap().contains("Extract data as JSON"),
+            messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Extract data as JSON"),
             "System message should contain the prompt"
         );
 
         // User message contains the content
         assert!(
-            messages[1]["content"].as_str().unwrap().contains("Here is some content"),
+            messages[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Here is some content"),
             "User message should contain the content"
         );
 
@@ -371,13 +386,7 @@ mod tests {
 
     #[test]
     fn test_payload_omits_optional_fields_when_none() {
-        let client = make_test_client(
-            "https://api.example.com/v1",
-            "sk-test",
-            "gpt-4",
-            None,
-            None,
-        );
+        let client = make_test_client("https://api.example.com/v1", "sk-test", "gpt-4", None, None);
 
         let payload = client.build_chat_payload("sys", "user");
         assert!(payload.get("max_tokens").is_none());

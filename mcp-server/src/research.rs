@@ -125,12 +125,7 @@ pub async fn deep_research(
         pageno: Some(1),
     };
 
-    let (search_results, _extras) = search_web_with_params(
-        state,
-        query,
-        Some(overrides),
-    )
-    .await?;
+    let (search_results, _extras) = search_web_with_params(state, query, Some(overrides)).await?;
 
     // Take only the number of results we need
     let search_results: Vec<SearchResult> = search_results
@@ -139,7 +134,11 @@ pub async fn deep_research(
         .collect();
 
     let search_time_ms = search_start.elapsed().as_millis() as u64;
-    info!("Search returned {} results in {}ms", search_results.len(), search_time_ms);
+    info!(
+        "Search returned {} results in {}ms",
+        search_results.len(),
+        search_time_ms
+    );
 
     if search_results.is_empty() {
         return Err(anyhow!("No search results found for query: {}", query));
@@ -196,9 +195,8 @@ pub async fn deep_research(
 
                 // Optionally crawl for more pages from this domain
                 if config.crawl_depth > 0 && config.max_pages_per_site > 1 {
-                    let pages_from_domain = all_sources.iter()
-                        .filter(|s| s.domain == domain)
-                        .count();
+                    let pages_from_domain =
+                        all_sources.iter().filter(|s| s.domain == domain).count();
 
                     if pages_from_domain < config.max_pages_per_site {
                         let crawl_config = CrawlConfig {
@@ -225,7 +223,8 @@ pub async fn deep_research(
                                             total_pages_scraped += 1;
                                             total_pages_crawled += 1;
 
-                                            let source = create_research_source(&page.url, &page_data, true);
+                                            let source =
+                                                create_research_source(&page.url, &page_data, true);
                                             all_sources.push(source);
                                         }
                                     }
@@ -246,8 +245,12 @@ pub async fn deep_research(
     }
 
     let scrape_time_ms = scrape_start.elapsed().as_millis() as u64;
-    info!("Scraped {} pages, crawled {} additional in {}ms",
-          total_pages_scraped - total_pages_crawled, total_pages_crawled, scrape_time_ms);
+    info!(
+        "Scraped {} pages, crawled {} additional in {}ms",
+        total_pages_scraped - total_pages_crawled,
+        total_pages_crawled,
+        scrape_time_ms
+    );
 
     if all_sources.is_empty() {
         return Err(anyhow!("Failed to scrape any pages"));
@@ -275,7 +278,11 @@ pub async fn deep_research(
 
     // Sort sources by relevance
     let mut sources = all_sources;
-    sources.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap_or(std::cmp::Ordering::Equal));
+    sources.sort_by(|a, b| {
+        b.relevance_score
+            .partial_cmp(&a.relevance_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let analysis_time_ms = analysis_start.elapsed().as_millis() as u64;
 
@@ -294,7 +301,10 @@ pub async fn deep_research(
 
     info!(
         "Deep research completed: {} sources, {} words, {} domains, {}ms total",
-        sources.len(), total_words, unique_domains.len(), statistics.duration_ms
+        sources.len(),
+        total_words,
+        unique_domains.len(),
+        statistics.duration_ms
     );
 
     Ok(DeepResearchResponse {
@@ -328,7 +338,8 @@ fn create_research_source(url: &str, data: &ScrapeResponse, from_crawl: bool) ->
     let relevance_score = calculate_relevance_score(data);
 
     // Get top headings
-    let headings: Vec<String> = data.headings
+    let headings: Vec<String> = data
+        .headings
         .iter()
         .filter(|h| h.level == "h1" || h.level == "h2")
         .take(5)
@@ -336,10 +347,7 @@ fn create_research_source(url: &str, data: &ScrapeResponse, from_crawl: bool) ->
         .collect();
 
     // Content preview
-    let content_preview: String = data.clean_content
-        .chars()
-        .take(500)
-        .collect();
+    let content_preview: String = data.clean_content.chars().take(500).collect();
 
     ResearchSource {
         url: url.to_string(),
@@ -366,21 +374,24 @@ fn determine_source_type(domain: &str, title: &str, content: &str) -> String {
         || domain_lower.contains("readthedocs")
         || domain_lower.contains("devdocs")
         || title_lower.contains("documentation")
-        || title_lower.contains("api reference") {
+        || title_lower.contains("api reference")
+    {
         return "documentation".to_string();
     }
 
     // Code repositories
     if domain_lower.contains("github.com")
         || domain_lower.contains("gitlab.com")
-        || domain_lower.contains("bitbucket.org") {
+        || domain_lower.contains("bitbucket.org")
+    {
         return "repository".to_string();
     }
 
     // Stack Overflow and Q&A
     if domain_lower.contains("stackoverflow.com")
         || domain_lower.contains("stackexchange.com")
-        || domain_lower.contains("quora.com") {
+        || domain_lower.contains("quora.com")
+    {
         return "qa".to_string();
     }
 
@@ -391,7 +402,8 @@ fn determine_source_type(domain: &str, title: &str, content: &str) -> String {
         || domain_lower.contains("hashnode")
         || title_lower.contains("tutorial")
         || title_lower.contains("how to")
-        || title_lower.contains("guide") {
+        || title_lower.contains("guide")
+    {
         return "blog".to_string();
     }
 
@@ -399,12 +411,16 @@ fn determine_source_type(domain: &str, title: &str, content: &str) -> String {
     if domain_lower.contains("news.")
         || domain_lower.contains("techcrunch")
         || domain_lower.contains("theverge")
-        || domain_lower.contains("wired") {
+        || domain_lower.contains("wired")
+    {
         return "news".to_string();
     }
 
     // Check content for indicators
-    if content.contains("```") || content.matches("def ").count() > 2 || content.matches("function ").count() > 2 {
+    if content.contains("```")
+        || content.matches("def ").count() > 2
+        || content.matches("function ").count() > 2
+    {
         return "technical".to_string();
     }
 
@@ -476,7 +492,9 @@ fn extract_topics(sources: &[ResearchSource], query: &str) -> Vec<TopicCluster> 
                 for window in words.windows(window_size) {
                     let phrase = window.join(" ");
                     if phrase.len() > 5 && !query_words.contains(phrase.as_str()) {
-                        let entry = topic_counts.entry(phrase.clone()).or_insert((0, Vec::new()));
+                        let entry = topic_counts
+                            .entry(phrase.clone())
+                            .or_insert((0, Vec::new()));
                         entry.0 += 1;
                         if !entry.1.contains(&source.url) {
                             entry.1.push(source.url.clone());
@@ -518,7 +536,9 @@ fn generate_key_findings(sources: &[ResearchSource], _query: &str) -> Vec<String
     if let Some((top_type, count)) = type_counts.iter().max_by_key(|(_, v)| *v) {
         findings.push(format!(
             "Primary source type: {} ({} of {} sources)",
-            top_type, count, sources.len()
+            top_type,
+            count,
+            sources.len()
         ));
     }
 
@@ -528,12 +548,16 @@ fn generate_key_findings(sources: &[ResearchSource], _query: &str) -> Vec<String
         findings.push(format!(
             "Found {} sources with code examples ({} total code blocks)",
             code_sources.len(),
-            code_sources.iter().map(|s| s.code_blocks_count).sum::<usize>()
+            code_sources
+                .iter()
+                .map(|s| s.code_blocks_count)
+                .sum::<usize>()
         ));
     }
 
     // Check for documentation
-    let doc_sources: Vec<_> = sources.iter()
+    let doc_sources: Vec<_> = sources
+        .iter()
         .filter(|s| s.source_type == "documentation")
         .collect();
     if !doc_sources.is_empty() {
@@ -597,7 +621,8 @@ fn generate_related_queries(sources: &[ResearchSource], query: &str) -> Vec<Stri
 /// Create research summary
 fn create_summary(sources: &[ResearchSource], query: &str) -> ResearchSummary {
     // Collect domains
-    let domains: Vec<_> = sources.iter()
+    let domains: Vec<_> = sources
+        .iter()
         .map(|s| s.domain.clone())
         .collect::<HashSet<_>>()
         .into_iter()
@@ -612,7 +637,8 @@ fn create_summary(sources: &[ResearchSource], query: &str) -> ResearchSummary {
 
     // Generate key points from high-relevance sources
     let mut key_points = Vec::new();
-    let top_sources: Vec<_> = sources.iter()
+    let top_sources: Vec<_> = sources
+        .iter()
         .filter(|s| s.relevance_score >= 0.6)
         .take(5)
         .collect();
@@ -636,7 +662,12 @@ fn create_summary(sources: &[ResearchSource], query: &str) -> ResearchSummary {
     let overview = format!(
         "Research on \"{}\" found {} sources across {} domains, containing {} total words. \
         {} sources include official documentation and {} contain code examples.",
-        query, total_sources, domains.len(), total_words, doc_count, code_count
+        query,
+        total_sources,
+        domains.len(),
+        total_words,
+        doc_count,
+        code_count
     );
 
     ResearchSummary {
@@ -672,15 +703,27 @@ mod tests {
 
     #[test]
     fn test_extract_domain() {
-        assert_eq!(extract_domain("https://docs.rust-lang.org/book/"), "docs.rust-lang.org");
+        assert_eq!(
+            extract_domain("https://docs.rust-lang.org/book/"),
+            "docs.rust-lang.org"
+        );
         assert_eq!(extract_domain("https://github.com/user/repo"), "github.com");
     }
 
     #[test]
     fn test_determine_source_type() {
-        assert_eq!(determine_source_type("docs.python.org", "Python Documentation", ""), "documentation");
-        assert_eq!(determine_source_type("github.com", "repo", ""), "repository");
-        assert_eq!(determine_source_type("stackoverflow.com", "question", ""), "qa");
+        assert_eq!(
+            determine_source_type("docs.python.org", "Python Documentation", ""),
+            "documentation"
+        );
+        assert_eq!(
+            determine_source_type("github.com", "repo", ""),
+            "repository"
+        );
+        assert_eq!(
+            determine_source_type("stackoverflow.com", "question", ""),
+            "qa"
+        );
         assert_eq!(determine_source_type("medium.com", "article", ""), "blog");
     }
 }
