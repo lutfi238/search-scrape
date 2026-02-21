@@ -74,15 +74,20 @@ impl ResearchJobStore {
         let mut jobs = self.jobs.write().await;
         if let Some(job) = jobs.get_mut(job_id) {
             job.status = ResearchJobStatus::Running;
+            job.progress.current_phase = "running".to_string();
             job.updated_at = Instant::now();
         }
     }
 
     pub async fn mark_completed(&self, job_id: &str, report: ResearchReport) {
+        let sources_len = report.sources.len();
         let mut jobs = self.jobs.write().await;
         if let Some(job) = jobs.get_mut(job_id) {
             job.final_report = Some(report);
             job.status = ResearchJobStatus::Completed;
+            job.progress.current_phase = "completed".to_string();
+            job.progress.sources_processed = sources_len;
+            job.progress.total_sources = sources_len;
             job.progress.progress_percent = 100.0;
             job.updated_at = Instant::now();
         }
