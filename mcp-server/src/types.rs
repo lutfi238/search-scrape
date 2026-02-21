@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::research::{ResearchSource, ResearchStatistics};
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
@@ -162,6 +164,100 @@ pub struct ScrapeBatchResponse {
     pub results: Vec<ScrapeBatchResult>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchJobRequest {
+    pub urls: Vec<String>,
+    #[serde(default)]
+    pub max_concurrent: Option<usize>,
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchJobResponse {
+    pub job_id: String,
+    pub status: JobStatus,
+    pub urls_total: usize,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchProgress {
+    pub urls_completed: usize,
+    pub urls_failed: usize,
+    pub progress_percent: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchStatusResponse {
+    pub status: JobStatus,
+    pub urls_total: usize,
+    pub urls_completed: usize,
+    pub urls_failed: usize,
+    pub progress_percent: f32,
+    #[serde(default)]
+    pub results: Option<Vec<ScrapeBatchResult>>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchJobRequest {
+    pub query: String,
+    #[serde(default)]
+    pub max_search_results: Option<usize>,
+    #[serde(default)]
+    pub crawl_depth: Option<usize>,
+    #[serde(default)]
+    pub max_pages_per_site: Option<usize>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub time_range: Option<String>,
+    #[serde(default)]
+    pub include_domains: Option<Vec<String>>,
+    #[serde(default)]
+    pub exclude_domains: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchJobResponse {
+    pub job_id: String,
+    pub status: JobStatus,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchProgress {
+    pub current_phase: String,
+    pub sources_processed: usize,
+    pub total_sources: usize,
+    pub progress_percent: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchStatusResponse {
+    pub status: JobStatus,
+    pub query: String,
+    pub current_phase: String,
+    pub sources_processed: usize,
+    pub total_sources: usize,
+    pub progress_percent: f32,
+    #[serde(default)]
+    pub final_report: Option<ResearchReport>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchReport {
+    pub query: String,
+    pub summary: String,
+    pub key_findings: Vec<String>,
+    pub sources: Vec<ResearchSource>,
+    pub statistics: ResearchStatistics,
+}
+
 // Website crawling types
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CrawlRequest {
@@ -305,6 +401,9 @@ pub enum CrawlJobStatus {
     Failed,
     Expired,
 }
+
+// Re-export JobStatus as alias for CrawlJobStatus
+pub type JobStatus = CrawlJobStatus;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CrawlStartRequest {
