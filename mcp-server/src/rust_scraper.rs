@@ -839,6 +839,32 @@ impl Default for RustScraper {
     }
 }
 
+/// Extract text content from GitHub's embedded JSON payload (`react-app.embeddedData`).
+///
+/// Checks `payload.blob.text` first (file view), then `payload.readme.text` (repo landing).
+/// Returns `None` when the payload does not contain a recognised text field or the text is blank.
+fn extract_github_embedded_content(json: &serde_json::Value) -> Option<String> {
+    let payload = json.get("payload")?;
+
+    if let Some(blob) = payload.get("blob") {
+        if let Some(text) = blob.get("text").and_then(|v| v.as_str()) {
+            if !text.trim().is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+
+    if let Some(readme) = payload.get("readme") {
+        if let Some(text) = readme.get("text").and_then(|v| v.as_str()) {
+            if !text.trim().is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -874,5 +900,27 @@ mod tests {
         let scraper = RustScraper::new();
         let text = "This is a test with five words";
     assert_eq!(scraper.count_words(text), 7);
+    }
+
+    #[test]
+    fn test_extract_github_embedded_content_blob_text() {
+        let json: serde_json::Value = serde_json::json!({
+            "payload": { "blob": { "text": "# Hello\nreal file content" } }
+        });
+        assert_eq!(
+            extract_github_embedded_content(&json).as_deref(),
+            Some("# Hello\nreal file content")
+        );
+    }
+
+    #[test]
+    fn test_extract_github_embedded_content_readme_text() {
+        let json: serde_json::Value = serde_json::json!({
+            "payload": { "readme": { "text": "## Readme\nrepo overview" } }
+        });
+        assert_eq!(
+            extract_github_embedded_content(&json).as_deref(),
+            Some("## Readme\nrepo overview")
+        );
     }
 }
