@@ -1,5 +1,5 @@
 use crate::types::*;
-use crate::{scrape, search, AppState};
+use crate::{research, scrape, search, AppState};
 use axum::{extract::State, http::StatusCode, response::Json};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -185,6 +185,83 @@ pub async fn list_tools() -> Json<McpToolsResponse> {
                     }
                 },
                 "required": ["url"]
+            }),
+        },
+        // scrape_batch_async
+        McpTool {
+            name: "scrape_batch_async".to_string(),
+            description: "Start an async batch scrape job. Returns a job_id to poll status.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "urls": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of URLs to scrape (max 100)"
+                    },
+                    "max_concurrent": {
+                        "type": "integer",
+                        "description": "Max concurrent requests (default 10, max 50)"
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Max chars per URL (default 10000)"
+                    }
+                },
+                "required": ["urls"]
+            }),
+        },
+        // check_batch_status
+        McpTool {
+            name: "check_batch_status".to_string(),
+            description: "Check status of an async batch scrape job.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "job_id": { "type": "string", "description": "Job ID from scrape_batch_async" },
+                    "include_results": {
+                        "type": "boolean",
+                        "description": "Include results in response (default false)"
+                    },
+                    "offset": { "type": "integer", "description": "Offset for pagination" },
+                    "limit": { "type": "integer", "description": "Limit for pagination (default 50)" }
+                },
+                "required": ["job_id"]
+            }),
+        },
+        // deep_research_async
+        McpTool {
+            name: "deep_research_async".to_string(),
+            description: "Start an async deep research job. Returns a job_id to poll status.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Research query" },
+                    "max_search_results": { "type": "integer" },
+                    "crawl_depth": { "type": "integer" },
+                    "max_pages_per_site": { "type": "integer" },
+                    "language": { "type": "string" },
+                    "time_range": { "type": "string" },
+                    "include_domains": { "type": "array", "items": { "type": "string" } },
+                    "exclude_domains": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["query"]
+            }),
+        },
+        // check_agent_status
+        McpTool {
+            name: "check_agent_status".to_string(),
+            description: "Check status of an async deep research job.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "job_id": { "type": "string", "description": "Job ID from deep_research_async" },
+                    "include_results": {
+                        "type": "boolean",
+                        "description": "Include final report in response (default false)"
+                    }
+                },
+                "required": ["job_id"]
             }),
         },
     ];
@@ -559,6 +636,218 @@ pub async fn call_tool(
                         is_error: true,
                     }))
                 }
+            }
+        }
+        "scrape_batch_async" => {
+            let urls = request
+                .arguments
+                .get("urls")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "Missing required parameter: urls (array of strings)".to_string(),
+                        }),
+                    )
+                })?;
+
+            if urls.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "urls array cannot be empty".to_string(),
+                    }),
+                ));
+            }
+
+            let max_concurrent = request
+                .arguments
+                .get("max_concurrent")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
+            let max_chars = request
+                .arguments
+                .get("max_chars")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
+
+            match scrape::scrape_batch_async(&state, urls, max_concurrent, max_chars).await {
+                Ok(response) => Ok(Json(McpCallResponse {
+                    content: vec![McpContent {
+                        content_type: "text".to_string(),
+                        text: serde_json::to_string(&response).unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)),
+                    }],
+                    is_error: false,
+                })),
+                Err(e) => Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Async batch scrape error: {}", e),
+                    }),
+                )),
+            }
+        }
+        "check_batch_status" => {
+            let job_id = request
+                .arguments
+                .get("job_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "Missing required parameter: job_id".to_string(),
+                        }),
+                    )
+                })?;
+
+            let include_results = request
+                .arguments
+                .get("include_results")
+                .and_then(|v| v.as_bool());
+            let offset = request
+                .arguments
+                .get("offset")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
+            let limit = request
+                .arguments
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
+
+            match scrape::check_batch_status(&state, job_id, include_results, offset, limit).await {
+                Ok(response) => Ok(Json(McpCallResponse {
+                    content: vec![McpContent {
+                        content_type: "text".to_string(),
+                        text: serde_json::to_string(&response).unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)),
+                    }],
+                    is_error: false,
+                })),
+                Err(e) => Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Batch status error: {}", e),
+                    }),
+                )),
+            }
+        }
+        "deep_research_async" => {
+            let query = request
+                .arguments
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "Missing required parameter: query".to_string(),
+                        }),
+                    )
+                })?;
+
+            let config = crate::types::ResearchJobRequest {
+                query: query.to_string(),
+                max_search_results: request
+                    .arguments
+                    .get("max_search_results")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize),
+                crawl_depth: request
+                    .arguments
+                    .get("crawl_depth")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize),
+                max_pages_per_site: request
+                    .arguments
+                    .get("max_pages_per_site")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize),
+                language: request
+                    .arguments
+                    .get("language")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                time_range: request
+                    .arguments
+                    .get("time_range")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                include_domains: request
+                    .arguments
+                    .get("include_domains")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    }),
+                exclude_domains: request
+                    .arguments
+                    .get("exclude_domains")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    }),
+            };
+
+            match research::deep_research_async(&state, query.to_string(), config).await {
+                Ok(response) => Ok(Json(McpCallResponse {
+                    content: vec![McpContent {
+                        content_type: "text".to_string(),
+                        text: serde_json::to_string(&response).unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)),
+                    }],
+                    is_error: false,
+                })),
+                Err(e) => Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Async deep research error: {}", e),
+                    }),
+                )),
+            }
+        }
+        "check_agent_status" => {
+            let job_id = request
+                .arguments
+                .get("job_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "Missing required parameter: job_id".to_string(),
+                        }),
+                    )
+                })?;
+
+            let include_results = request
+                .arguments
+                .get("include_results")
+                .and_then(|v| v.as_bool());
+
+            match research::check_agent_status(&state, job_id, include_results).await {
+                Ok(response) => Ok(Json(McpCallResponse {
+                    content: vec![McpContent {
+                        content_type: "text".to_string(),
+                        text: serde_json::to_string(&response).unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)),
+                    }],
+                    is_error: false,
+                })),
+                Err(e) => Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Agent status error: {}", e),
+                    }),
+                )),
             }
         }
         _ => Err((
