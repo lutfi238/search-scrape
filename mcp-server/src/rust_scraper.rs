@@ -325,14 +325,27 @@ impl RustScraper {
     fn extract_clean_content(&self, html: &str, base_url: &Url) -> String {
         // 0) GitHub fast path: read the embedded JSON payload injected by the React app.
         //    This avoids putting noisy server-rendered HTML through readability entirely.
+        //
+        //    Blob/readme content passes through `post_clean_text` to strip any embedded
+        //    boilerplate that may be present in raw markdown files.
+        //
+        //    Discussion content is already structured prose assembled from JSON fields
+        //    (title, body, comment bodies). Applying `post_clean_text` would incorrectly
+        //    discard lines containing words like "share", "subscribe", or "read more" that
+        //    are part of the actual discussion. Use `clean_text` (whitespace-only) instead.
         if html.contains("react-app.embeddedData") {
             if let Ok(sel) = Selector::parse("script[data-target='react-app.embeddedData']") {
                 let doc = Html::parse_document(html);
                 if let Some(el) = doc.select(&sel).next() {
                     let raw = el.text().collect::<String>();
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
-                        if let Some(content) = extract_github_embedded_content(&json) {
+                        // Blob / readme: may contain markdown boilerplate; apply full filter.
+                        if let Some(content) = extract_github_embedded_blob_or_readme(&json) {
                             return self.post_clean_text(&content);
+                        }
+                        // Discussion: clean prose from JSON; skip boilerplate filter.
+                        if let Some(content) = extract_github_embedded_discussion(&json) {
+                            return self.clean_text(&content);
                         }
                     }
                 }
@@ -856,16 +869,12 @@ impl Default for RustScraper {
     }
 }
 
-/// Extract text content from GitHub's embedded JSON payload (`react-app.embeddedData`).
+/// Returns `payload.blob.text` or `payload.readme.text` from the GitHub embedded payload,
+/// whichever is present and non-empty (blob takes priority).
 ///
-/// Priority order:
-/// 1. `payload.blob.text` — file/blob view (highest priority, returned as-is).
-/// 2. `payload.readme.text` — repository landing page.
-/// 3. `payload.discussion` — discussion/thread: title + body + comment nodes assembled into
-///    a readable plain-text block.
-///
-/// Returns `None` when the payload does not contain a recognised text field or the text is blank.
-fn extract_github_embedded_content(json: &serde_json::Value) -> Option<String> {
+/// These are raw file / README contents that may include markdown boilerplate and should be
+/// passed through `post_clean_text` by the caller.
+fn extract_github_embedded_blob_or_readme(json: &serde_json::Value) -> Option<String> {
     let payload = json.get("payload")?;
 
     if let Some(blob) = payload.get("blob") {
@@ -884,41 +893,56 @@ fn extract_github_embedded_content(json: &serde_json::Value) -> Option<String> {
         }
     }
 
-    if let Some(discussion) = payload.get("discussion") {
-        let mut parts: Vec<String> = Vec::new();
-
-        if let Some(title) = non_empty_str(discussion.get("title")) {
-            parts.push(title.to_string());
-        }
-        if let Some(body) = non_empty_str(discussion.get("body")) {
-            parts.push(body.to_string());
-        }
-
-        // Collect comment bodies from `comments.nodes[].body`
-        if let Some(nodes) = discussion
-            .get("comments")
-            .and_then(|c| c.get("nodes"))
-            .and_then(|n| n.as_array())
-        {
-            for node in nodes {
-                if let Some(body) = non_empty_str(node.get("body")) {
-                    parts.push(body.to_string());
-                }
-            }
-        }
-
-        if !parts.is_empty() {
-            return Some(parts.join("\n\n"));
-        }
-    }
-
     None
 }
 
-/// Returns the string value of a JSON field when it is non-empty after trimming.
+/// Assembles a readable plain-text block from `payload.discussion` in the GitHub embedded
+/// payload: `title`, `body`, and every `comments.nodes[].body` joined with blank lines.
+///
+/// Returns `None` when the payload has no `discussion` field or it yields no non-empty parts.
+///
+/// The assembled text is already structured prose from JSON fields and must NOT be passed
+/// through `post_clean_text`; callers should apply only whitespace normalisation (`clean_text`).
+fn extract_github_embedded_discussion(json: &serde_json::Value) -> Option<String> {
+    let discussion = json.get("payload")?.get("discussion")?;
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(title) = non_empty_str(discussion.get("title")) {
+        parts.push(title.to_string());
+    }
+    if let Some(body) = non_empty_str(discussion.get("body")) {
+        parts.push(body.to_string());
+    }
+
+    // Collect comment bodies from `comments.nodes[].body`
+    if let Some(nodes) = discussion
+        .get("comments")
+        .and_then(|c| c.get("nodes"))
+        .and_then(|n| n.as_array())
+    {
+        for node in nodes {
+            if let Some(body) = non_empty_str(node.get("body")) {
+                parts.push(body.to_string());
+            }
+        }
+    }
+
+    if !parts.is_empty() {
+        Some(parts.join("\n\n"))
+    } else {
+        None
+    }
+}
+
+/// Returns the **trimmed** string value of a JSON field when it is non-empty.
+///
+/// Both the emptiness check and the returned slice operate on the trimmed value so
+/// callers receive whitespace-free edges without a separate `.trim()` call.
 #[inline]
 fn non_empty_str(v: Option<&serde_json::Value>) -> Option<&str> {
-    v.and_then(|val| val.as_str()).filter(|s| !s.trim().is_empty())
+    v.and_then(|val| val.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 /// Returns true when a single text line looks like a leaked JSON fragment
@@ -952,11 +976,11 @@ fn is_json_noise_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_rust_scraper() {
         let scraper = RustScraper::new();
-        
+
         // Test with a simple HTML page
         match scraper.scrape_url("https://httpbin.org/html").await {
             Ok(content) => {
@@ -970,7 +994,7 @@ mod tests {
             }
         }
     }
-    
+
     #[test]
     fn test_clean_text() {
         let scraper = RustScraper::new();
@@ -978,7 +1002,7 @@ mod tests {
         let cleaned = scraper.clean_text(text);
         assert_eq!(cleaned, "This is some text");
     }
-    
+
     #[test]
     fn test_word_count() {
         let scraper = RustScraper::new();
@@ -986,13 +1010,108 @@ mod tests {
     assert_eq!(scraper.count_words(text), 7);
     }
 
+    // -------------------------------------------------------------------------
+    // non_empty_str: fix — must return the TRIMMED slice, not the original.
+    // -------------------------------------------------------------------------
+
+    /// Before the fix, non_empty_str returned the untrimmed original slice so the
+    /// caller's `.to_string()` would carry leading/trailing whitespace into the
+    /// assembled discussion text.
+    #[test]
+    fn test_non_empty_str_returns_trimmed_value() {
+        let v = serde_json::Value::String("  hello world  ".to_string());
+        let result = non_empty_str(Some(&v));
+        assert_eq!(result, Some("hello world"), "non_empty_str must return the trimmed slice");
+    }
+
+    #[test]
+    fn test_non_empty_str_whitespace_only_returns_none() {
+        let v = serde_json::Value::String("   ".to_string());
+        assert!(non_empty_str(Some(&v)).is_none(), "whitespace-only must be None");
+    }
+
+    #[test]
+    fn test_non_empty_str_empty_returns_none() {
+        let v = serde_json::Value::String(String::new());
+        assert!(non_empty_str(Some(&v)).is_none());
+    }
+
+    #[test]
+    fn test_non_empty_str_none_input_returns_none() {
+        assert!(non_empty_str(None).is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // Discussion embedded content: fix — must NOT pass through post_clean_text.
+    // Words like "share", "subscribe", "newsletter", "read more", "cookie" are
+    // valid discussion prose and must be preserved.
+    // -------------------------------------------------------------------------
+
+    /// Regression: before the fix the discussion content was routed through
+    /// `post_clean_text` which dropped lines matching garbage patterns like
+    /// `(?i)\bshare\b`, `(?i)subscribe`, `(?i)newsletter`, `(?i)read more`,
+    /// `(?i)cookie`, and `(?i)\bcomments?$` — stripping meaningful discussion lines.
+    #[test]
+    fn test_discussion_content_preserves_garbage_pattern_words() {
+        // Each comment body contains a word that `post_clean_text` would strip.
+        let json: serde_json::Value = serde_json::json!({
+            "payload": {
+                "discussion": {
+                    "title": "API discussion",
+                    "body": "You can share your results with the team.",
+                    "comments": {
+                        "nodes": [
+                            { "body": "I subscribe to the webhook events to get updates." },
+                            { "body": "The newsletter endpoint is at /api/newsletter/subscribe." },
+                            { "body": "Read more about retry logic in the docs." },
+                            { "body": "Store the session cookie securely." }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let out = extract_github_embedded_discussion(&json).unwrap_or_default();
+        // These lines must survive — they are genuine discussion content.
+        assert!(out.contains("share your results"), "line with 'share' must be preserved");
+        assert!(out.contains("subscribe to the webhook"), "line with 'subscribe' must be preserved");
+        assert!(out.contains("newsletter endpoint"), "line with 'newsletter' must be preserved");
+        assert!(out.contains("Read more about retry"), "line with 'read more' must be preserved");
+        assert!(out.contains("session cookie"), "line with 'cookie' must be preserved");
+    }
+
+    /// Verify that `extract_clean_content` with a discussion payload does NOT strip
+    /// lines containing garbage-filter keywords via `post_clean_text`.
+    #[test]
+    fn test_extract_clean_content_discussion_preserves_sensitive_words() {
+        let scraper = RustScraper::new();
+        let html = r##"
+    <html><body>
+      <script type="application/json" data-target="react-app.embeddedData">
+        {"payload":{"discussion":{"title":"Sharing data","body":"You can share the config and subscribe to updates.","comments":{"nodes":[]}}}}
+      </script>
+      <div>fallback noise</div>
+    </body></html>
+    "##;
+
+        let base = url::Url::parse("https://github.com/org/repo/discussions/1").unwrap();
+        let text = scraper.extract_clean_content(html, &base);
+
+        assert!(text.contains("share the config"), "'share' must survive in discussion output");
+        assert!(text.contains("subscribe to updates"), "'subscribe' must survive in discussion output");
+    }
+
+    // -------------------------------------------------------------------------
+    // Blob / readme: existing tests updated to use the new split helpers.
+    // -------------------------------------------------------------------------
+
     #[test]
     fn test_extract_github_embedded_content_blob_text() {
         let json: serde_json::Value = serde_json::json!({
             "payload": { "blob": { "text": "# Hello\nreal file content" } }
         });
         assert_eq!(
-            extract_github_embedded_content(&json).as_deref(),
+            extract_github_embedded_blob_or_readme(&json).as_deref(),
             Some("# Hello\nreal file content")
         );
     }
@@ -1003,9 +1122,50 @@ mod tests {
             "payload": { "readme": { "text": "## Readme\nrepo overview" } }
         });
         assert_eq!(
-            extract_github_embedded_content(&json).as_deref(),
+            extract_github_embedded_blob_or_readme(&json).as_deref(),
             Some("## Readme\nrepo overview")
         );
+    }
+
+    /// Blob takes priority over readme when both are present.
+    #[test]
+    fn test_blob_takes_priority_over_readme() {
+        let json: serde_json::Value = serde_json::json!({
+            "payload": {
+                "blob": { "text": "blob content" },
+                "readme": { "text": "readme content" }
+            }
+        });
+        assert_eq!(
+            extract_github_embedded_blob_or_readme(&json).as_deref(),
+            Some("blob content")
+        );
+    }
+
+    /// Blob/readme take priority over discussion.
+    #[test]
+    fn test_blob_takes_priority_over_discussion() {
+        // The caller in extract_clean_content calls blob_or_readme first; discussion
+        // is only reached when blob_or_readme returns None.
+        let json: serde_json::Value = serde_json::json!({
+            "payload": {
+                "blob": { "text": "blob wins" },
+                "discussion": { "title": "ignored discussion", "body": "body" }
+            }
+        });
+        assert_eq!(
+            extract_github_embedded_blob_or_readme(&json).as_deref(),
+            Some("blob wins"),
+            "blob must beat discussion"
+        );
+        // When blob is absent, discussion is returned by the other helper.
+        let json2: serde_json::Value = serde_json::json!({
+            "payload": {
+                "discussion": { "title": "discussion wins", "body": "body text" }
+            }
+        });
+        assert!(extract_github_embedded_blob_or_readme(&json2).is_none());
+        assert!(extract_github_embedded_discussion(&json2).is_some());
     }
 
     #[test]
@@ -1056,7 +1216,7 @@ mod tests {
             }
         });
 
-        let out = extract_github_embedded_content(&json).unwrap_or_default();
+        let out = extract_github_embedded_discussion(&json).unwrap_or_default();
         assert!(out.contains("How to use the API?"));
         assert!(out.contains("I need help using this endpoint."));
         assert!(out.contains("Use token auth and retry on 429."));
