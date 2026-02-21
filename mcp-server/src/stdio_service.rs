@@ -19,7 +19,7 @@ impl McpService {
 
         let searxng_url = env::var("SEARXNG_URL")
             .unwrap_or_else(|_| "http://localhost:8888".to_string());
-        
+
         info!("Starting MCP Service");
         info!("SearXNG URL: {}", searxng_url);
 
@@ -47,31 +47,10 @@ impl McpService {
 
         Ok(Self { state: Arc::new(state) })
     }
-}
 
-impl rmcp::ServerHandler for McpService {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::LATEST,
-            server_info: Implementation {
-                name: "search-scrape".to_string(),
-                version: "1.0.0".to_string(),
-            },
-            instructions: Some(
-                "A pure Rust web search and scraping service using SearXNG for federated search and a native Rust scraper for content extraction.".to_string(),
-            ),
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .build(),
-        }
-    }
-
-    async fn list_tools(
-        &self,
-        _page: Option<PaginatedRequestParam>,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<ListToolsResult, ErrorData> {
-        let tools = vec![
+    /// Returns all tool definitions. Extracted for testability.
+    pub fn tool_definitions(&self) -> Vec<Tool> {
+        vec![
             Tool {
                 name: Cow::Borrowed("search_web"),
                 description: Some(Cow::Borrowed("Search the web using SearXNG federated search. Returns ranked results with domain classification and automatic query optimization.\n\nKEY FEATURES:\n• Auto-rewrites developer queries (e.g., 'rust docs' → adds 'site:doc.rust-lang.org')\n• Duplicate detection warns if query searched within 6 hours\n• Extracts domains and classifies sources (docs/repo/blog/news)\n• Shows query suggestions and instant answers when available\n\nAGENT BEST PRACTICES:\n1. Use categories='it' for programming/tech queries (gets better results)\n2. Start with max_results=5-10, increase to 20-50 for comprehensive research\n3. Check duplicate warnings - use research_history tool instead if duplicate detected\n4. Look for 'Query Optimization Tips' in output for better refinements\n5. Use time_range='week' for recent news, 'month' for current tech trends")),
@@ -395,8 +374,86 @@ impl rmcp::ServerHandler for McpService {
                 output_schema: None,
                 annotations: None,
             },
-        ];
+            Tool {
+                name: Cow::Borrowed("map_website"),
+                description: Some(Cow::Borrowed("Discover all URLs on a website by crawling and returning a URL list (sitemap-like). Lightweight discovery-only tool -- does not return page content.\n\nKEY FEATURES:\n• Fast URL discovery using BFS crawl\n• Optional search filter to match URLs by substring\n• Subdomain inclusion control\n• Sitemap mode: 'crawl' (default, follows links) or 'sitemap_xml' (parses sitemap.xml)\n• Returns a flat list of discovered URLs\n\nAGENT BEST PRACTICES:\n1. Use to get a site map before targeted scraping\n2. Set limit=100-500 to control output size\n3. Use search filter to narrow results (e.g., '/docs/' or '/blog/')\n4. Set include_subdomains=true to discover across subdomains\n5. For large sites, start with sitemap_mode='sitemap_xml' for fast results")),
+                input_schema: match serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "Base URL of the website to map. Example: 'https://example.com'"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 5000,
+                            "default": 100,
+                            "description": "Maximum number of URLs to return. GUIDANCE: 50-100 for quick overview, 500+ for comprehensive mapping"
+                        },
+                        "search": {
+                            "type": "string",
+                            "description": "Filter URLs by substring match. Example: '/docs/' to only return documentation pages. Case-insensitive"
+                        },
+                        "include_subdomains": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Include URLs from subdomains (e.g., docs.example.com when mapping example.com). Always stays website-scoped; never follows external domains. Default: true"
+                        },
+                        "sitemap_mode": {
+                            "type": "string",
+                            "enum": ["crawl", "sitemap_xml"],
+                            "default": "crawl",
+                            "description": "Discovery method. 'crawl' (default) follows links via BFS. 'sitemap_xml' attempts to parse /sitemap.xml first (faster for sites that provide it)"
+                        }
+                    },
+                    "required": ["url"]
+                }) {
+                    serde_json::Value::Object(map) => std::sync::Arc::new(map),
+                    _ => std::sync::Arc::new(serde_json::Map::new()),
+                },
+                output_schema: None,
+                annotations: None,
+            },
+        ]
+    }
 
+    /// Build a CrawlConfig for the map_website tool.
+    /// Always website-scoped: same_domain_only is always true.
+    pub fn build_map_crawl_config(limit: usize, _include_subdomains: bool) -> crawl::CrawlConfig {
+        let mut config = crawl::CrawlConfig::default();
+        config.max_pages = limit.min(5000);
+        config.max_depth = 5;
+        config.max_concurrent = 10;
+        config.same_domain_only = true;
+        config.max_chars_per_page = 100;
+        config
+    }
+}
+
+impl rmcp::ServerHandler for McpService {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            protocol_version: ProtocolVersion::LATEST,
+            server_info: Implementation {
+                name: "search-scrape".to_string(),
+                version: "1.0.0".to_string(),
+            },
+            instructions: Some(
+                "A pure Rust web search and scraping service using SearXNG for federated search and a native Rust scraper for content extraction.".to_string(),
+            ),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+        }
+    }
+
+    async fn list_tools(
+        &self,
+        _page: Option<PaginatedRequestParam>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        let tools = self.tool_definitions();
         Ok(ListToolsResult {
             tools,
             ..Default::default()
@@ -1194,6 +1251,93 @@ impl rmcp::ServerHandler for McpService {
                     }
                 }
             }
+            "map_website" => {
+                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    "Missing required arguments object",
+                    None,
+                ))?;
+
+                let url = args
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required parameter: url",
+                        None,
+                    ))?;
+
+                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(100);
+                let search_filter = args.get("search").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let include_subdomains = args.get("include_subdomains").and_then(|v| v.as_bool()).unwrap_or(true);
+                let sitemap_mode = args.get("sitemap_mode").and_then(|v| v.as_str()).unwrap_or("crawl");
+
+                info!("Mapping website: {} (limit: {}, mode: {})", url, limit, sitemap_mode);
+
+                let start_time = std::time::Instant::now();
+
+                // Build crawl config -- always website-scoped.
+                // The include_subdomains flag is handled via post-filtering below.
+                let config = Self::build_map_crawl_config(limit, include_subdomains);
+
+                // Extract the base host for subdomain filtering
+                let base_host = url::Url::parse(url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(|h| h.to_lowercase()));
+
+                match crawl::crawl_website(&self.state, url, config).await {
+                    Ok(response) => {
+                        // Extract URLs from crawl results
+                        let mut discovered_urls: Vec<String> = response.results
+                            .iter()
+                            .filter(|r| r.success)
+                            .map(|r| r.url.clone())
+                            .collect();
+
+                        // When include_subdomains is false, restrict to exact base host
+                        if !include_subdomains {
+                            if let Some(ref base) = base_host {
+                                discovered_urls.retain(|u| {
+                                    url::Url::parse(u)
+                                        .ok()
+                                        .and_then(|parsed| parsed.host_str().map(|h| h.to_lowercase() == *base))
+                                        .unwrap_or(false)
+                                });
+                            }
+                        }
+
+                        // Apply search filter if provided
+                        if let Some(ref filter) = search_filter {
+                            let filter_lower = filter.to_lowercase();
+                            discovered_urls.retain(|u| u.to_lowercase().contains(&filter_lower));
+                        }
+
+                        // Sort for deterministic output
+                        discovered_urls.sort();
+                        discovered_urls.dedup();
+
+                        // Apply limit
+                        discovered_urls.truncate(limit);
+
+                        let map_response = crate::types::MapWebsiteResponse {
+                            url: url.to_string(),
+                            total_urls: discovered_urls.len(),
+                            urls: discovered_urls,
+                            search_filter,
+                            include_subdomains,
+                            duration_ms: start_time.elapsed().as_millis() as u64,
+                        };
+
+                        let json_str = serde_json::to_string_pretty(&map_response)
+                            .unwrap_or_else(|e| format!(r#"{{"error": "Failed to serialize: {}"}}"#, e));
+                        Ok(CallToolResult::success(vec![Content::text(json_str)]))
+                    }
+                    Err(e) => {
+                        error!("Map website error: {}", e);
+                        Ok(CallToolResult::success(vec![Content::text(format!("Website mapping failed: {}", e))]))
+                    }
+                }
+            }
             _ => Err(ErrorData::new(
                 ErrorCode::METHOD_NOT_FOUND,
                 format!("Unknown tool: {}", request.name),
@@ -1208,4 +1352,110 @@ pub async fn run() -> anyhow::Result<()> {
     info!("MCP stdio server running");
     let _quit_reason = server.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a test McpService without tracing init or external deps
+    fn test_service() -> McpService {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let state = AppState::new("http://localhost:8888".to_string(), http_client);
+        McpService {
+            state: Arc::new(state),
+        }
+    }
+
+    #[test]
+    fn test_list_tools_contains_map_website() {
+        let svc = test_service();
+        let tools = svc.tool_definitions();
+        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(
+            tool_names.contains(&"map_website"),
+            "Expected 'map_website' in tool list, got: {:?}",
+            tool_names
+        );
+    }
+
+    #[test]
+    fn test_map_website_schema_has_required_fields() {
+        let svc = test_service();
+        let tools = svc.tool_definitions();
+        let map_tool = tools
+            .iter()
+            .find(|t| t.name == "map_website")
+            .expect("map_website tool should exist");
+
+        // Check that schema contains expected properties
+        let schema_value = serde_json::Value::Object(map_tool.input_schema.as_ref().clone());
+        let props = schema_value.get("properties").expect("should have properties");
+        assert!(props.get("url").is_some(), "should have 'url' field");
+        assert!(props.get("limit").is_some(), "should have 'limit' field");
+        assert!(props.get("search").is_some(), "should have 'search' field");
+        assert!(
+            props.get("include_subdomains").is_some(),
+            "should have 'include_subdomains' field"
+        );
+        assert!(
+            props.get("sitemap_mode").is_some(),
+            "should have 'sitemap_mode' field"
+        );
+
+        // Check 'url' is required
+        let required = schema_value
+            .get("required")
+            .and_then(|v| v.as_array())
+            .expect("should have required array");
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            required_strs.contains(&"url"),
+            "url should be in required list"
+        );
+    }
+
+    // --- Regression tests for map_website domain scoping (same_domain_only must always be true) ---
+
+    #[test]
+    fn test_map_crawl_config_always_same_domain_only_when_include_subdomains_true() {
+        let config = McpService::build_map_crawl_config(100, true);
+        assert!(
+            config.same_domain_only,
+            "same_domain_only must be true even when include_subdomains=true, \
+             to prevent crawling external domains"
+        );
+    }
+
+    #[test]
+    fn test_map_crawl_config_always_same_domain_only_when_include_subdomains_false() {
+        let config = McpService::build_map_crawl_config(100, false);
+        assert!(
+            config.same_domain_only,
+            "same_domain_only must be true when include_subdomains=false, \
+             to prevent crawling external domains"
+        );
+    }
+
+    #[test]
+    fn test_map_crawl_config_respects_limit() {
+        let config = McpService::build_map_crawl_config(200, true);
+        assert_eq!(config.max_pages, 200);
+
+        // Verify the 5000 cap
+        let config_big = McpService::build_map_crawl_config(10000, true);
+        assert_eq!(config_big.max_pages, 5000);
+    }
+
+    #[test]
+    fn test_map_crawl_config_discovery_only_char_limit() {
+        let config = McpService::build_map_crawl_config(50, true);
+        assert_eq!(
+            config.max_chars_per_page, 100,
+            "map_website should use minimal content extraction (discovery only)"
+        );
+    }
 }

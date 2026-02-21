@@ -370,6 +370,18 @@ pub struct ToolErrorEnvelope {
     pub request_id_or_job_id: Option<String>,
 }
 
+// Website mapping types
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MapWebsiteResponse {
+    pub url: String,
+    pub total_urls: usize,
+    pub urls: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_filter: Option<String>,
+    pub include_subdomains: bool,
+    pub duration_ms: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,5 +535,49 @@ mod tests {
         assert!(envelope.details.is_none());
         assert!(!envelope.retryable);
         assert!(envelope.request_id_or_job_id.is_none());
+    }
+
+    // --- MapWebsiteResponse tests ---
+
+    #[test]
+    fn test_map_website_response_roundtrip() {
+        let resp = MapWebsiteResponse {
+            url: "https://example.com".to_string(),
+            total_urls: 3,
+            urls: vec![
+                "https://example.com/".to_string(),
+                "https://example.com/about".to_string(),
+                "https://example.com/contact".to_string(),
+            ],
+            search_filter: Some("about".to_string()),
+            include_subdomains: false,
+            duration_ms: 1234,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: MapWebsiteResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.url, "https://example.com");
+        assert_eq!(deserialized.total_urls, 3);
+        assert_eq!(deserialized.urls.len(), 3);
+        assert_eq!(deserialized.search_filter.as_deref(), Some("about"));
+        assert!(!deserialized.include_subdomains);
+        assert_eq!(deserialized.duration_ms, 1234);
+    }
+
+    #[test]
+    fn test_map_website_response_without_search_filter() {
+        let resp = MapWebsiteResponse {
+            url: "https://example.com".to_string(),
+            total_urls: 1,
+            urls: vec!["https://example.com/".to_string()],
+            search_filter: None,
+            include_subdomains: true,
+            duration_ms: 500,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        // search_filter should not appear in JSON when None
+        assert!(!json.contains("search_filter"));
+        let deserialized: MapWebsiteResponse = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.search_filter.is_none());
+        assert!(deserialized.include_subdomains);
     }
 }
