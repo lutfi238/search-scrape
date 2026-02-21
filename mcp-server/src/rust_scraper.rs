@@ -858,7 +858,12 @@ impl Default for RustScraper {
 
 /// Extract text content from GitHub's embedded JSON payload (`react-app.embeddedData`).
 ///
-/// Checks `payload.blob.text` first (file view), then `payload.readme.text` (repo landing).
+/// Priority order:
+/// 1. `payload.blob.text` — file/blob view (highest priority, returned as-is).
+/// 2. `payload.readme.text` — repository landing page.
+/// 3. `payload.discussion` — discussion/thread: title + body + comment nodes assembled into
+///    a readable plain-text block.
+///
 /// Returns `None` when the payload does not contain a recognised text field or the text is blank.
 fn extract_github_embedded_content(json: &serde_json::Value) -> Option<String> {
     let payload = json.get("payload")?;
@@ -879,7 +884,41 @@ fn extract_github_embedded_content(json: &serde_json::Value) -> Option<String> {
         }
     }
 
+    if let Some(discussion) = payload.get("discussion") {
+        let mut parts: Vec<String> = Vec::new();
+
+        if let Some(title) = non_empty_str(discussion.get("title")) {
+            parts.push(title.to_string());
+        }
+        if let Some(body) = non_empty_str(discussion.get("body")) {
+            parts.push(body.to_string());
+        }
+
+        // Collect comment bodies from `comments.nodes[].body`
+        if let Some(nodes) = discussion
+            .get("comments")
+            .and_then(|c| c.get("nodes"))
+            .and_then(|n| n.as_array())
+        {
+            for node in nodes {
+                if let Some(body) = non_empty_str(node.get("body")) {
+                    parts.push(body.to_string());
+                }
+            }
+        }
+
+        if !parts.is_empty() {
+            return Some(parts.join("\n\n"));
+        }
+    }
+
     None
+}
+
+/// Returns the string value of a JSON field when it is non-empty after trimming.
+#[inline]
+fn non_empty_str(v: Option<&serde_json::Value>) -> Option<&str> {
+    v.and_then(|val| val.as_str()).filter(|s| !s.trim().is_empty())
 }
 
 /// Returns true when a single text line looks like a leaked JSON fragment
@@ -998,6 +1037,29 @@ mod tests {
         let text = scraper.extract_clean_content(html, &base);
 
         assert!(text.contains("actual content from blob"));
+    }
+
+    #[test]
+    fn test_extract_github_embedded_content_discussion_body_and_comments() {
+        let json: serde_json::Value = serde_json::json!({
+            "payload": {
+                "discussion": {
+                    "title": "How to use the API?",
+                    "body": "I need help using this endpoint.",
+                    "comments": {
+                        "nodes": [
+                            { "body": "Use token auth and retry on 429." },
+                            { "body": "Also check rate-limit headers." }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let out = extract_github_embedded_content(&json).unwrap_or_default();
+        assert!(out.contains("How to use the API?"));
+        assert!(out.contains("I need help using this endpoint."));
+        assert!(out.contains("Use token auth and retry on 429."));
     }
 
     /// Exercises the ratio branch (2b): line does NOT start with `{` or `[`
