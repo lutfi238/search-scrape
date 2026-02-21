@@ -19,49 +19,35 @@ Sedang mengimplementasi shortlist `09c2def` (GitHub Discussions hydration + shor
 | `7dc2bfb` | Task 1: feat(scraper): hydrate github discussion embedded payload content |
 | `bfe1a14` | Task 1 fixup: fix(scraper): preserve discussion embedded content fidelity |
 | `3c81c75` | Task 2: feat(scraper): bypass aggressive cleanup for short discussion content |
+| `a25c116` | Task 2 fixup: fix URL query string false positive in question detection |
 
 ---
 
 ## Status Task
 
 - **Task 1** ✅ COMPLETED
-- **Task 2** 🔄 IN PROGRESS (ada issue sama test yang perlu diperbaiki)
-- **Task 3** ⏳ PENDING
-- **Task 4** ⏳ PENDING
-- **Task 5** ⏳ PENDING (verification)
+- **Task 2** ✅ COMPLETED (fix commit: a25c116)
+- **Task 3** ✅ COMPLETED (test commit: 69493c4)
+- **Task 4** ✅ COMPLETED (8 discussion tests pass - implementation already wired)
+- **Task 5** ✅ COMPLETED (91 tests, fmt, clippy - all pass)
 
 ---
 
-## Masalah Saat Ini
+## Commits Terbaru
 
-### Task 2 - is_short_discussion_like_text heuristic
-
-**Issue:** Test ini gagal:
-```
-test_is_short_discussion_like_text_does_not_trigger_on_url_query_only
-Assertion: !is_short_discussion_like_text("https://example.com/path?utm_source=share")
-FAILED - fungsi mengembalikan true (seharusnya false)
-```
-
-**Penyebab:** Implementasi baru menggunakan `zip` + `skip(1)` untuk deteksi `?` masih salah. URL query string `?utm_` mengandung `?` dan heuristic salah memicu bypass.
-
-**Lokasi:** `mcp-server/src/rust_scraper.rs` sekitar line 972-998
-
-**Status uncommitted changes:**
-- `is_short_discussion_like_text` sudah diperbaiki dari substring ke token-based matching
-- Tapi masih ada bug pada logika deteksi `?`
-- Ada 2 test baru yang sudah added:
-  - `test_is_short_discussion_like_text_does_not_match_substrings` ✅ PASS
-  - `test_is_short_discussion_like_text_does_not_trigger_on_url_query_only` ❌ FAIL
+| Commit | Deskripsi |
+|--------|-----------|
+| `a25c116` | Task 2 fixup: fix URL query string false positive in question detection |
+| `69493c4` | Task 3: add test for substantive code block extraction |
 
 ---
 
 ## Langkah Selanjutnya
 
-1. **Perbaiki `is_short_discussion_like_text`** - logic deteksi `?` perlu diperbaiki agar tidak terbaca dari URL query string
-2. **Jalankan test** sampe semua hijau
-3. **Commit fixup** untuk Task 2
-4. **Lanjut Task 3** - contextual code-block extraction
+1. ~~**Perbaiki `is_short_discussion_like_text`**~~ ✅ DONE
+2. ~~**Jalankan test**~~ ✅ DONE (90 tests pass)
+3. ~~**Commit fixup**~~ ✅ DONE
+4. ~~**Task 3**~~ ✅ DONE (test passes - implementation already handles it)
 5. **Lanjut Task 4** - wire discussion hydration
 6. **Task 5** - verification pass (fmt, test, clippy)
 

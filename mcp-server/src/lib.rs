@@ -1,16 +1,16 @@
-pub mod search;
-pub mod scrape;
 pub mod crawl;
-pub mod extract;
-pub mod research;
-pub mod types;
-pub mod mcp;
-pub mod rust_scraper;
-pub mod stdio_service;
-pub mod history;
-pub mod query_rewriter;
-pub mod llm_client;
 pub mod crawl_jobs;
+pub mod extract;
+pub mod history;
+pub mod llm_client;
+pub mod mcp;
+pub mod query_rewriter;
+pub mod research;
+pub mod rust_scraper;
+pub mod scrape;
+pub mod search;
+pub mod stdio_service;
+pub mod types;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -18,7 +18,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     // Caches for performance
     pub search_cache: moka::future::Cache<String, Vec<types::SearchResult>>, // key: query
-    pub scrape_cache: moka::future::Cache<String, types::ScrapeResponse>,     // key: url
+    pub scrape_cache: moka::future::Cache<String, types::ScrapeResponse>,    // key: url
     // Concurrency control for external calls
     pub outbound_limit: std::sync::Arc<tokio::sync::Semaphore>,
     // Memory manager for research history (optional)

@@ -105,7 +105,12 @@ impl CrawlJobStore {
     }
 
     /// Update progress counters for a running job.
-    pub async fn update_progress(&self, job_id: &str, pages_crawled: usize, pages_total: Option<usize>) {
+    pub async fn update_progress(
+        &self,
+        job_id: &str,
+        pages_crawled: usize,
+        pages_total: Option<usize>,
+    ) {
         let mut jobs = self.jobs.write().await;
         if let Some(job) = jobs.get_mut(job_id) {
             job.pages_crawled = pages_crawled;
@@ -189,7 +194,9 @@ mod tests {
         let store = CrawlJobStore::new(std::time::Duration::from_secs(60));
         let job_id = store.create_job("https://example.com".to_string()).await;
         store.mark_running(&job_id).await;
-        store.mark_failed(&job_id, "connection timeout".to_string()).await;
+        store
+            .mark_failed(&job_id, "connection timeout".to_string())
+            .await;
         let job = store.get_job(&job_id).await.unwrap();
         assert_eq!(job.status, CrawlJobStatus::Failed);
         assert_eq!(job.error.as_deref(), Some("connection timeout"));

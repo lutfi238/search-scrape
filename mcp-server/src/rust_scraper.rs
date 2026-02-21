@@ -6,7 +6,10 @@ use readability::extractor;
 use regex::Regex;
 use reqwest::Client;
 use scraper::{Html, Selector};
-use select::{document::Document as SelectDoc, predicate::{Name as SelName, Attr as SelAttr, Predicate}};
+use select::{
+    document::Document as SelectDoc,
+    predicate::{Attr as SelAttr, Name as SelName, Predicate},
+};
 use std::collections::HashSet;
 use tracing::{info, warn};
 use url::Url;
@@ -50,8 +53,7 @@ impl RustScraper {
         info!("Scraping URL with Rust-native scraper: {}", url);
 
         // Validate URL
-        let parsed_url = Url::parse(url)
-            .map_err(|e| anyhow!("Invalid URL '{}': {}", url, e))?;
+        let parsed_url = Url::parse(url).map_err(|e| anyhow!("Invalid URL '{}': {}", url, e))?;
 
         if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
             return Err(anyhow!("URL must use HTTP or HTTPS protocol"));
@@ -63,7 +65,10 @@ impl RustScraper {
             .client
             .get(url)
             .header("User-Agent", user_agent)
-            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
             .header("Accept-Language", "en-US,en;q=0.5")
             // Rely on reqwest automatic decompression; remove manual Accept-Encoding to avoid serving compressed body as text
             .header("DNT", "1")
@@ -88,26 +93,26 @@ impl RustScraper {
             .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
 
         // Parse HTML
-    let document = Html::parse_document(&html);
-        
+        let document = Html::parse_document(&html);
+
         // Extract basic metadata
-    let title = self.extract_title(&document);
-    let meta_description = self.extract_meta_description(&document);
-    let meta_keywords = self.extract_meta_keywords(&document);
+        let title = self.extract_title(&document);
+        let meta_description = self.extract_meta_description(&document);
+        let meta_keywords = self.extract_meta_keywords(&document);
         let language = self.detect_language(&document, &html);
-    let canonical_url = self.extract_canonical(&document, &parsed_url);
-    let site_name = self.extract_site_name(&document);
-    let (og_title, og_description, og_image) = self.extract_open_graph(&document, &parsed_url);
-    let author = self.extract_author(&document);
-    let published_at = self.extract_published_time(&document);
+        let canonical_url = self.extract_canonical(&document, &parsed_url);
+        let site_name = self.extract_site_name(&document);
+        let (og_title, og_description, og_image) = self.extract_open_graph(&document, &parsed_url);
+        let author = self.extract_author(&document);
+        let published_at = self.extract_published_time(&document);
 
         // Extract code blocks BEFORE html2text conversion (Priority 1 fix)
         let code_blocks = self.extract_code_blocks(&document);
 
         // Extract readable content using readability
         let clean_content = self.extract_clean_content(&html, &parsed_url);
-    let word_count = self.count_words(&clean_content);
-    let reading_time_minutes = Some(((word_count as f64 / 200.0).ceil() as u32).max(1));
+        let word_count = self.count_words(&clean_content);
+        let reading_time_minutes = Some(((word_count as f64 / 200.0).ceil() as u32).max(1));
 
         // Extract structured data
         let headings = self.extract_headings(&document);
@@ -116,19 +121,15 @@ impl RustScraper {
         let images = self.extract_images(&document, &parsed_url);
 
         // Calculate extraction quality score (Priority 1 fix)
-        let extraction_score = self.calculate_extraction_score(
-            word_count,
-            &published_at,
-            &code_blocks,
-            &headings,
-        );
+        let extraction_score =
+            self.calculate_extraction_score(word_count, &published_at, &code_blocks, &headings);
 
         // Extract domain from URL (Priority 2 enhancement)
         let domain = parsed_url.host_str().map(|h| h.to_string());
 
         // Initialize warnings
         let warnings = Vec::new();
-        
+
         let result = ScrapeResponse {
             url: url.to_string(),
             title,
@@ -162,7 +163,10 @@ impl RustScraper {
             domain,
         };
 
-        info!("Successfully scraped: {} ({} words, score: {:.2})", result.title, result.word_count, extraction_score);
+        info!(
+            "Successfully scraped: {} ({} words, score: {:.2})",
+            result.title, result.word_count, extraction_score
+        );
         Ok(result)
     }
 
@@ -220,7 +224,11 @@ impl RustScraper {
         if let Ok(selector) = Selector::parse("link[rel=\"canonical\"]") {
             if let Some(el) = document.select(&selector).next() {
                 if let Some(href) = el.value().attr("href") {
-                    return base.join(href).ok().map(|u| u.to_string()).or_else(|| Some(href.to_string()));
+                    return base
+                        .join(href)
+                        .ok()
+                        .map(|u| u.to_string())
+                        .or_else(|| Some(href.to_string()));
                 }
             }
         }
@@ -233,7 +241,9 @@ impl RustScraper {
             if let Some(el) = document.select(&selector).next() {
                 if let Some(content) = el.value().attr("content") {
                     let v = content.trim();
-                    if !v.is_empty() { return Some(v.to_string()); }
+                    if !v.is_empty() {
+                        return Some(v.to_string());
+                    }
                 }
             }
         }
@@ -241,16 +251,43 @@ impl RustScraper {
     }
 
     /// Extract OpenGraph basic fields
-    fn extract_open_graph(&self, document: &Html, base: &Url) -> (Option<String>, Option<String>, Option<String>) {
+    fn extract_open_graph(
+        &self,
+        document: &Html,
+        base: &Url,
+    ) -> (Option<String>, Option<String>, Option<String>) {
         let og_title = if let Ok(sel) = Selector::parse("meta[property=\"og:title\"]") {
-            document.select(&sel).next().and_then(|e| e.value().attr("content")).map(|s| s.trim().to_string())
-        } else { None };
+            document
+                .select(&sel)
+                .next()
+                .and_then(|e| e.value().attr("content"))
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        };
         let og_description = if let Ok(sel) = Selector::parse("meta[property=\"og:description\"]") {
-            document.select(&sel).next().and_then(|e| e.value().attr("content")).map(|s| s.trim().to_string())
-        } else { None };
+            document
+                .select(&sel)
+                .next()
+                .and_then(|e| e.value().attr("content"))
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        };
         let og_image = if let Ok(sel) = Selector::parse("meta[property=\"og:image\"]") {
-            document.select(&sel).next().and_then(|e| e.value().attr("content")).and_then(|s| base.join(s).ok().map(|u| u.to_string()).or_else(|| Some(s.to_string())))
-        } else { None };
+            document
+                .select(&sel)
+                .next()
+                .and_then(|e| e.value().attr("content"))
+                .and_then(|s| {
+                    base.join(s)
+                        .ok()
+                        .map(|u| u.to_string())
+                        .or_else(|| Some(s.to_string()))
+                })
+        } else {
+            None
+        };
         (og_title, og_description, og_image)
     }
 
@@ -259,13 +296,17 @@ impl RustScraper {
         // Meta author
         if let Ok(sel) = Selector::parse("meta[name=\"author\"]") {
             if let Some(el) = document.select(&sel).next() {
-                if let Some(content) = el.value().attr("content") { return Some(content.trim().to_string()); }
+                if let Some(content) = el.value().attr("content") {
+                    return Some(content.trim().to_string());
+                }
             }
         }
         // Article author
         if let Ok(sel) = Selector::parse("meta[property=\"article:author\"]") {
             if let Some(el) = document.select(&sel).next() {
-                if let Some(content) = el.value().attr("content") { return Some(content.trim().to_string()); }
+                if let Some(content) = el.value().attr("content") {
+                    return Some(content.trim().to_string());
+                }
             }
         }
         None
@@ -275,7 +316,9 @@ impl RustScraper {
     fn extract_published_time(&self, document: &Html) -> Option<String> {
         if let Ok(sel) = Selector::parse("meta[property=\"article:published_time\"]") {
             if let Some(el) = document.select(&sel).next() {
-                if let Some(content) = el.value().attr("content") { return Some(content.trim().to_string()); }
+                if let Some(content) = el.value().attr("content") {
+                    return Some(content.trim().to_string());
+                }
             }
         }
         None
@@ -325,14 +368,27 @@ impl RustScraper {
     fn extract_clean_content(&self, html: &str, base_url: &Url) -> String {
         // 0) GitHub fast path: read the embedded JSON payload injected by the React app.
         //    This avoids putting noisy server-rendered HTML through readability entirely.
+        //
+        //    Blob/readme content passes through `post_clean_text` to strip any embedded
+        //    boilerplate that may be present in raw markdown files.
+        //
+        //    Discussion content is already structured prose assembled from JSON fields
+        //    (title, body, comment bodies). Applying `post_clean_text` would incorrectly
+        //    discard lines containing words like "share", "subscribe", or "read more" that
+        //    are part of the actual discussion. Use `clean_text` (whitespace-only) instead.
         if html.contains("react-app.embeddedData") {
             if let Ok(sel) = Selector::parse("script[data-target='react-app.embeddedData']") {
                 let doc = Html::parse_document(html);
                 if let Some(el) = doc.select(&sel).next() {
                     let raw = el.text().collect::<String>();
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
-                        if let Some(content) = extract_github_embedded_content(&json) {
+                        // Blob / readme: may contain markdown boilerplate; apply full filter.
+                        if let Some(content) = extract_github_embedded_blob_or_readme(&json) {
                             return self.post_clean_text(&content);
+                        }
+                        // Discussion: clean prose from JSON; skip boilerplate filter.
+                        if let Some(content) = extract_github_embedded_discussion(&json) {
+                            return self.clean_text(&content);
                         }
                     }
                 }
@@ -344,7 +400,8 @@ impl RustScraper {
 
         // 1a) mdBook-style extractor (e.g., Rust Book) — try focused body first
         if let Some(md_text) = self.extract_mdbook_like(&pre) {
-            if md_text.len() > 120 { // substantial content
+            if md_text.len() > 120 {
+                // substantial content
                 return self.post_clean_text(&md_text);
             }
         }
@@ -394,14 +451,17 @@ impl RustScraper {
     fn extract_mdbook_like(&self, html: &str) -> Option<String> {
         let doc = SelectDoc::from(html);
         // Try #content first - this is mdBook's main content container
-        if let Some(node) = doc.find(SelName("div").and(SelAttr("id", "content"))).next() {
+        if let Some(node) = doc
+            .find(SelName("div").and(SelAttr("id", "content")))
+            .next()
+        {
             let inner = node.inner_html();
             let text = html2text::from_read(inner.as_bytes(), 80);
             let cleaned = self.clean_text(&text);
             let word_count = self.count_words(&cleaned);
             info!("mdBook extractor (#content): {} words", word_count);
-            if word_count > 50 { 
-                return Some(cleaned); 
+            if word_count > 50 {
+                return Some(cleaned);
             }
         }
         // Try main
@@ -411,8 +471,8 @@ impl RustScraper {
             let cleaned = self.clean_text(&text);
             let word_count = self.count_words(&cleaned);
             info!("mdBook extractor (main): {} words", word_count);
-            if word_count > 50 { 
-                return Some(cleaned); 
+            if word_count > 50 {
+                return Some(cleaned);
             }
         }
         // Try article
@@ -422,8 +482,8 @@ impl RustScraper {
             let cleaned = self.clean_text(&text);
             let word_count = self.count_words(&cleaned);
             info!("mdBook extractor (article): {} words", word_count);
-            if word_count > 50 { 
-                return Some(cleaned); 
+            if word_count > 50 {
+                return Some(cleaned);
             }
         }
         info!("mdBook extractor found no suitable content");
@@ -433,10 +493,10 @@ impl RustScraper {
     /// Fallback text extraction when readability fails
     fn fallback_text_extraction(&self, html: &str) -> String {
         let document = Html::parse_document(html);
-        
+
         // Remove script and style elements
         let mut text_parts = Vec::new();
-        
+
         if let Ok(body_selector) = Selector::parse("body") {
             if let Some(body) = document.select(&body_selector).next() {
                 self.extract_text_recursive(&body, &mut text_parts);
@@ -449,7 +509,7 @@ impl RustScraper {
                 }
             }
         }
-        
+
         let text = text_parts.join(" ");
         self.clean_text(&text)
     }
@@ -460,9 +520,20 @@ impl RustScraper {
             if let Some(child_element) = scraper::ElementRef::wrap(child) {
                 let tag_name = child_element.value().name();
                 // Skip noisy/boilerplate elements entirely
-                if matches!(tag_name,
-                    "script" | "style" | "noscript" | "svg" | "canvas" | "iframe" | "form" |
-                    "header" | "footer" | "nav" | "aside") {
+                if matches!(
+                    tag_name,
+                    "script"
+                        | "style"
+                        | "noscript"
+                        | "svg"
+                        | "canvas"
+                        | "iframe"
+                        | "form"
+                        | "header"
+                        | "footer"
+                        | "nav"
+                        | "aside"
+                ) {
                     continue;
                 }
 
@@ -473,7 +544,10 @@ impl RustScraper {
                     skip |= self.is_noise_identifier(id);
                 }
                 for class in attrs.classes() {
-                    if self.is_noise_identifier(class) { skip = true; break; }
+                    if self.is_noise_identifier(class) {
+                        skip = true;
+                        break;
+                    }
                 }
                 if skip {
                     continue;
@@ -490,34 +564,60 @@ impl RustScraper {
         // Remove excessive whitespace
         let re_whitespace = Regex::new(r"\s+").unwrap();
         let re_newlines = Regex::new(r"\n\s*\n").unwrap();
-        
+
         let cleaned = re_whitespace.replace_all(text, " ");
         let cleaned = re_newlines.replace_all(&cleaned, "\n\n");
-        
+
         cleaned.trim().to_string()
     }
 
-    /// Final post-processing to strip boilerplate lines, trackers, CTA, share/cookie prompts
+    /// Final post-processing to strip boilerplate lines, trackers, CTA, share/cookie prompts.
+    ///
+    /// For short discussion-like snippets we bypass keyword-based boilerplate stripping,
+    /// because words like "share" or "subscribe" can be meaningful conversation content.
+    /// JSON-noise filtering remains active in all modes.
     fn post_clean_text(&self, text: &str) -> String {
         // Normalize first
-    let out = self.clean_text(text);
+        let out = self.clean_text(text);
+        let bypass_garbage_filter = is_short_discussion_like_text(&out);
 
         // Drop lines matching common garbage patterns
         let garbage = [
-            r"(?i)subscribe", r"(?i)sign up", r"(?i)cookie", r"(?i)accept all",
-            r"(?i)advert", r"(?i)sponsor", r"(?i)newsletter", r"(?i)\bshare\b", r"(?i)related articles",
-            r"(?i)^comments?$", r"(?i)read more", r"(?i)continue reading", r"(?i)terms of service", r"(?i)privacy policy",
+            r"(?i)subscribe",
+            r"(?i)sign up",
+            r"(?i)cookie",
+            r"(?i)accept all",
+            r"(?i)advert",
+            r"(?i)sponsor",
+            r"(?i)newsletter",
+            r"(?i)\bshare\b",
+            r"(?i)related articles",
+            r"(?i)^comments?$",
+            r"(?i)read more",
+            r"(?i)continue reading",
+            r"(?i)terms of service",
+            r"(?i)privacy policy",
         ];
         let re_garbage = Regex::new(&garbage.join("|")).unwrap();
 
         let mut kept = Vec::new();
         for line in out.split('\n') {
             let line_trim = line.trim();
-            if line_trim.is_empty() { continue; }
-            // Remove very short noisy lines and those matching garbage
-            if line_trim.len() < 3 { continue; }
-            if re_garbage.is_match(line_trim) { continue; }
-            if is_json_noise_line(line_trim) { continue; }
+            if line_trim.is_empty() {
+                continue;
+            }
+            // Remove very short noisy lines
+            if line_trim.len() < 3 {
+                continue;
+            }
+            // Always filter JSON fragments, even in discussion bypass mode.
+            if is_json_noise_line(line_trim) {
+                continue;
+            }
+            // Only apply keyword-garbage filtering when not in short discussion mode.
+            if !bypass_garbage_filter && re_garbage.is_match(line_trim) {
+                continue;
+            }
             kept.push(line_trim.to_string());
         }
 
@@ -555,14 +655,45 @@ impl RustScraper {
         let ident = ident.to_ascii_lowercase();
         let needles = [
             // avoid plain "ad" to not match words like "header"
-            "ads", "advert", "adsense", "adunit", "ad-slot", "ad_container", "adbox",
-            "sponsor", "promo", "cookie", "consent", "banner", "modal",
-            "subscribe", "newsletter", "share", "social", "sidebar", "comments", "related",
-            "breadcrumb", "pagination", "nav", "footer", "header", "hero", "toolbar",
+            "ads",
+            "advert",
+            "adsense",
+            "adunit",
+            "ad-slot",
+            "ad_container",
+            "adbox",
+            "sponsor",
+            "promo",
+            "cookie",
+            "consent",
+            "banner",
+            "modal",
+            "subscribe",
+            "newsletter",
+            "share",
+            "social",
+            "sidebar",
+            "comments",
+            "related",
+            "breadcrumb",
+            "pagination",
+            "nav",
+            "footer",
+            "header",
+            "hero",
+            "toolbar",
         ];
-        if needles.iter().any(|n| ident.contains(n)) { return true; }
+        if needles.iter().any(|n| ident.contains(n)) {
+            return true;
+        }
         // Additional hyphen/underscore separated ad markers
-        if ident.contains("-ad") || ident.contains("ad-") || ident.contains("_ad") || ident.contains("ad_") { return true; }
+        if ident.contains("-ad")
+            || ident.contains("ad-")
+            || ident.contains("_ad")
+            || ident.contains("ad_")
+        {
+            return true;
+        }
         false
     }
 
@@ -615,7 +746,7 @@ impl RustScraper {
     /// Extract headings (h1-h6)
     fn extract_headings(&self, document: &Html) -> Vec<Heading> {
         let mut headings = Vec::new();
-        
+
         for level in 1..=6 {
             let sel: &str = match level {
                 1 => "h1",
@@ -637,7 +768,7 @@ impl RustScraper {
                 }
             }
         }
-        
+
         headings
     }
 
@@ -665,7 +796,11 @@ impl RustScraper {
             if Selector::parse(content_sel).is_ok() {
                 let links = self.extract_links_from_selector(document, base_url, content_sel);
                 if !links.is_empty() && links.len() >= 3 {
-                    info!("Extracted {} links from main content using selector: {}", links.len(), content_sel);
+                    info!(
+                        "Extracted {} links from main content using selector: {}",
+                        links.len(),
+                        content_sel
+                    );
                     return links;
                 }
             }
@@ -677,26 +812,34 @@ impl RustScraper {
     }
 
     /// Helper to extract links from a specific selector
-    fn extract_links_from_selector(&self, document: &Html, base_url: &Url, selector_str: &str) -> Vec<Link> {
+    fn extract_links_from_selector(
+        &self,
+        document: &Html,
+        base_url: &Url,
+        selector_str: &str,
+    ) -> Vec<Link> {
         let mut links = Vec::new();
         let mut seen_urls = HashSet::new();
-        
+
         if let Ok(selector) = Selector::parse(selector_str) {
             for element in document.select(&selector) {
                 if let Some(href) = element.value().attr("href") {
                     // Skip anchor links, javascript, and common non-content patterns
-                    if href.starts_with('#') || href.starts_with("javascript:") || href.starts_with("mailto:") {
+                    if href.starts_with('#')
+                        || href.starts_with("javascript:")
+                        || href.starts_with("mailto:")
+                    {
                         continue;
                     }
 
                     let text = element.text().collect::<String>().trim().to_string();
-                    
+
                     // Convert relative URLs to absolute
                     let absolute_url = match base_url.join(href) {
                         Ok(url) => url.to_string(),
                         Err(_) => href.to_string(),
                     };
-                    
+
                     // Avoid duplicates
                     if !seen_urls.contains(&absolute_url) {
                         seen_urls.insert(absolute_url.clone());
@@ -708,7 +851,7 @@ impl RustScraper {
                 }
             }
         }
-        
+
         links
     }
 
@@ -716,7 +859,7 @@ impl RustScraper {
     fn extract_images(&self, document: &Html, base_url: &Url) -> Vec<Image> {
         let mut images = Vec::new();
         let mut seen_srcs = HashSet::new();
-        
+
         if let Ok(selector) = Selector::parse("img[src]") {
             for element in document.select(&selector) {
                 if let Some(src) = element.value().attr("src") {
@@ -725,14 +868,14 @@ impl RustScraper {
                         Ok(url) => url.to_string(),
                         Err(_) => src.to_string(),
                     };
-                    
+
                     // Avoid duplicates
                     if !seen_srcs.contains(&absolute_src) {
                         seen_srcs.insert(absolute_src.clone());
-                        
+
                         let alt = element.value().attr("alt").unwrap_or("").to_string();
                         let title = element.value().attr("title").unwrap_or("").to_string();
-                        
+
                         images.push(Image {
                             src: absolute_src,
                             alt,
@@ -742,30 +885,33 @@ impl RustScraper {
                 }
             }
         }
-        
+
         images
     }
 
     /// Extract code blocks with language hints (Priority 1 fix)
     fn extract_code_blocks(&self, document: &Html) -> Vec<CodeBlock> {
         let mut code_blocks = Vec::new();
-        
+
         // Extract <pre><code> blocks
         if let Ok(selector) = Selector::parse("pre code, pre, code") {
             for element in document.select(&selector) {
                 // Get the code content preserving whitespace
                 let code = element.text().collect::<Vec<_>>().join("");
-                
+
                 // Skip if empty or too small
                 if code.trim().len() < 10 {
                     continue;
                 }
-                
+
                 // Try to extract language hint from class attribute
-                let language = element.value().attr("class")
+                let language = element
+                    .value()
+                    .attr("class")
                     .and_then(|classes| {
                         // Look for patterns like "language-rust", "lang-python", "rust", etc.
-                        classes.split_whitespace()
+                        classes
+                            .split_whitespace()
                             .find(|c| c.starts_with("language-") || c.starts_with("lang-"))
                             .map(|c| {
                                 c.strip_prefix("language-")
@@ -778,23 +924,23 @@ impl RustScraper {
                         // Check parent <pre> element
                         element.value().attr("data-lang").map(|s| s.to_string())
                     });
-                
+
                 code_blocks.push(CodeBlock {
                     language,
                     code,
-                    start_char: None,  // Could be enhanced with position tracking
+                    start_char: None, // Could be enhanced with position tracking
                     end_char: None,
                 });
             }
         }
-        
+
         // Deduplicate (sometimes code appears in nested tags)
         let mut seen = HashSet::new();
         code_blocks.retain(|cb| {
             let key = format!("{:?}:{}", cb.language, &cb.code);
             seen.insert(key)
         });
-        
+
         code_blocks
     }
 
@@ -808,31 +954,31 @@ impl RustScraper {
         headings: &[Heading],
     ) -> f64 {
         let mut score = 0.0;
-        
+
         // Content presence (0.0-0.3)
         if word_count > 50 {
             score += 0.3;
         } else if word_count > 20 {
             score += 0.15;
         }
-        
+
         // Has publish date (0.2)
         if published_at.is_some() {
             score += 0.2;
         }
-        
+
         // Has code blocks (0.2) - good for technical content
         if !code_blocks.is_empty() {
             score += 0.2;
         }
-        
+
         // Has structured headings (0.15)
         if headings.len() > 2 {
             score += 0.15;
         } else if !headings.is_empty() {
             score += 0.075;
         }
-        
+
         // Content length score (0.0-0.15)
         // Optimal around 500-2000 words
         let length_score = if (500..=2000).contains(&word_count) {
@@ -845,7 +991,7 @@ impl RustScraper {
             0.0
         };
         score += length_score;
-        
+
         score.min(1.0)
     }
 }
@@ -856,11 +1002,12 @@ impl Default for RustScraper {
     }
 }
 
-/// Extract text content from GitHub's embedded JSON payload (`react-app.embeddedData`).
+/// Returns `payload.blob.text` or `payload.readme.text` from the GitHub embedded payload,
+/// whichever is present and non-empty (blob takes priority).
 ///
-/// Checks `payload.blob.text` first (file view), then `payload.readme.text` (repo landing).
-/// Returns `None` when the payload does not contain a recognised text field or the text is blank.
-fn extract_github_embedded_content(json: &serde_json::Value) -> Option<String> {
+/// These are raw file / README contents that may include markdown boilerplate and should be
+/// passed through `post_clean_text` by the caller.
+fn extract_github_embedded_blob_or_readme(json: &serde_json::Value) -> Option<String> {
     let payload = json.get("payload")?;
 
     if let Some(blob) = payload.get("blob") {
@@ -880,6 +1027,90 @@ fn extract_github_embedded_content(json: &serde_json::Value) -> Option<String> {
     }
 
     None
+}
+
+/// Assembles a readable plain-text block from `payload.discussion` in the GitHub embedded
+/// payload: `title`, `body`, and every `comments.nodes[].body` joined with blank lines.
+///
+/// Returns `None` when the payload has no `discussion` field or it yields no non-empty parts.
+///
+/// The assembled text is already structured prose from JSON fields and must NOT be passed
+/// through `post_clean_text`; callers should apply only whitespace normalisation (`clean_text`).
+fn extract_github_embedded_discussion(json: &serde_json::Value) -> Option<String> {
+    let discussion = json.get("payload")?.get("discussion")?;
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(title) = non_empty_str(discussion.get("title")) {
+        parts.push(title.to_string());
+    }
+    if let Some(body) = non_empty_str(discussion.get("body")) {
+        parts.push(body.to_string());
+    }
+
+    // Collect comment bodies from `comments.nodes[].body`
+    if let Some(nodes) = discussion
+        .get("comments")
+        .and_then(|c| c.get("nodes"))
+        .and_then(|n| n.as_array())
+    {
+        for node in nodes {
+            if let Some(body) = non_empty_str(node.get("body")) {
+                parts.push(body.to_string());
+            }
+        }
+    }
+
+    if !parts.is_empty() {
+        Some(parts.join("\n\n"))
+    } else {
+        None
+    }
+}
+
+/// Returns the **trimmed** string value of a JSON field when it is non-empty.
+///
+/// Both the emptiness check and the returned slice operate on the trimmed value so
+/// callers receive whitespace-free edges without a separate `.trim()` call.
+#[inline]
+fn non_empty_str(v: Option<&serde_json::Value>) -> Option<&str> {
+    v.and_then(|val| val.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// Heuristic gate for short discussion-like text snippets.
+///
+/// We only bypass keyword-based garbage filtering when text is short and looks like
+/// conversational content (question/answer wording), not boilerplate blobs.
+fn is_short_discussion_like_text(text: &str) -> bool {
+    let words = text.split_whitespace().count();
+    if words == 0 || words > 80 {
+        return false;
+    }
+
+    let lower = text.to_ascii_lowercase();
+
+    // Require at least one sentence-style question marker (question mark preceded by whitespace).
+    // This excludes URL query strings like "path?utm_source" where ? follows a path character.
+    if lower
+        .chars()
+        .zip(lower.chars().skip(1))
+        .any(|(prev, curr)| curr == '?' && prev.is_whitespace())
+    {
+        return true;
+    }
+
+    // Match full tokens only (not substrings like "show" -> "how").
+    let tokens = lower
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .filter(|t| !t.is_empty());
+
+    tokens.into_iter().any(|t| {
+        matches!(
+            t,
+            "question" | "answer" | "issue" | "help" | "thanks" | "please" | "why" | "how"
+        )
+    })
 }
 
 /// Returns true when a single text line looks like a leaked JSON fragment
@@ -913,25 +1144,31 @@ fn is_json_noise_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_rust_scraper() {
         let scraper = RustScraper::new();
-        
+
         // Test with a simple HTML page
         match scraper.scrape_url("https://httpbin.org/html").await {
             Ok(content) => {
                 assert!(!content.title.is_empty(), "Title should not be empty");
-                assert!(!content.clean_content.is_empty(), "Content should not be empty");
+                assert!(
+                    !content.clean_content.is_empty(),
+                    "Content should not be empty"
+                );
                 assert_eq!(content.status_code, 200, "Status code should be 200");
-                assert!(content.word_count > 0, "Word count should be greater than 0");
+                assert!(
+                    content.word_count > 0,
+                    "Word count should be greater than 0"
+                );
             }
             Err(e) => {
                 println!("Rust scraper test failed: {}", e);
             }
         }
     }
-    
+
     #[test]
     fn test_clean_text() {
         let scraper = RustScraper::new();
@@ -939,13 +1176,136 @@ mod tests {
         let cleaned = scraper.clean_text(text);
         assert_eq!(cleaned, "This is some text");
     }
-    
+
     #[test]
     fn test_word_count() {
         let scraper = RustScraper::new();
         let text = "This is a test with five words";
-    assert_eq!(scraper.count_words(text), 7);
+        assert_eq!(scraper.count_words(text), 7);
     }
+
+    // -------------------------------------------------------------------------
+    // non_empty_str: fix — must return the TRIMMED slice, not the original.
+    // -------------------------------------------------------------------------
+
+    /// Before the fix, non_empty_str returned the untrimmed original slice so the
+    /// caller's `.to_string()` would carry leading/trailing whitespace into the
+    /// assembled discussion text.
+    #[test]
+    fn test_non_empty_str_returns_trimmed_value() {
+        let v = serde_json::Value::String("  hello world  ".to_string());
+        let result = non_empty_str(Some(&v));
+        assert_eq!(
+            result,
+            Some("hello world"),
+            "non_empty_str must return the trimmed slice"
+        );
+    }
+
+    #[test]
+    fn test_non_empty_str_whitespace_only_returns_none() {
+        let v = serde_json::Value::String("   ".to_string());
+        assert!(
+            non_empty_str(Some(&v)).is_none(),
+            "whitespace-only must be None"
+        );
+    }
+
+    #[test]
+    fn test_non_empty_str_empty_returns_none() {
+        let v = serde_json::Value::String(String::new());
+        assert!(non_empty_str(Some(&v)).is_none());
+    }
+
+    #[test]
+    fn test_non_empty_str_none_input_returns_none() {
+        assert!(non_empty_str(None).is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // Discussion embedded content: fix — must NOT pass through post_clean_text.
+    // Words like "share", "subscribe", "newsletter", "read more", "cookie" are
+    // valid discussion prose and must be preserved.
+    // -------------------------------------------------------------------------
+
+    /// Regression: before the fix the discussion content was routed through
+    /// `post_clean_text` which dropped lines matching garbage patterns like
+    /// `(?i)\bshare\b`, `(?i)subscribe`, `(?i)newsletter`, `(?i)read more`,
+    /// `(?i)cookie`, and `(?i)\bcomments?$` — stripping meaningful discussion lines.
+    #[test]
+    fn test_discussion_content_preserves_garbage_pattern_words() {
+        // Each comment body contains a word that `post_clean_text` would strip.
+        let json: serde_json::Value = serde_json::json!({
+            "payload": {
+                "discussion": {
+                    "title": "API discussion",
+                    "body": "You can share your results with the team.",
+                    "comments": {
+                        "nodes": [
+                            { "body": "I subscribe to the webhook events to get updates." },
+                            { "body": "The newsletter endpoint is at /api/newsletter/subscribe." },
+                            { "body": "Read more about retry logic in the docs." },
+                            { "body": "Store the session cookie securely." }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let out = extract_github_embedded_discussion(&json).unwrap_or_default();
+        // These lines must survive — they are genuine discussion content.
+        assert!(
+            out.contains("share your results"),
+            "line with 'share' must be preserved"
+        );
+        assert!(
+            out.contains("subscribe to the webhook"),
+            "line with 'subscribe' must be preserved"
+        );
+        assert!(
+            out.contains("newsletter endpoint"),
+            "line with 'newsletter' must be preserved"
+        );
+        assert!(
+            out.contains("Read more about retry"),
+            "line with 'read more' must be preserved"
+        );
+        assert!(
+            out.contains("session cookie"),
+            "line with 'cookie' must be preserved"
+        );
+    }
+
+    /// Verify that `extract_clean_content` with a discussion payload does NOT strip
+    /// lines containing garbage-filter keywords via `post_clean_text`.
+    #[test]
+    fn test_extract_clean_content_discussion_preserves_sensitive_words() {
+        let scraper = RustScraper::new();
+        let html = r##"
+    <html><body>
+      <script type="application/json" data-target="react-app.embeddedData">
+        {"payload":{"discussion":{"title":"Sharing data","body":"You can share the config and subscribe to updates.","comments":{"nodes":[]}}}}
+      </script>
+      <div>fallback noise</div>
+    </body></html>
+    "##;
+
+        let base = url::Url::parse("https://github.com/org/repo/discussions/1").unwrap();
+        let text = scraper.extract_clean_content(html, &base);
+
+        assert!(
+            text.contains("share the config"),
+            "'share' must survive in discussion output"
+        );
+        assert!(
+            text.contains("subscribe to updates"),
+            "'subscribe' must survive in discussion output"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Blob / readme: existing tests updated to use the new split helpers.
+    // -------------------------------------------------------------------------
 
     #[test]
     fn test_extract_github_embedded_content_blob_text() {
@@ -953,7 +1313,7 @@ mod tests {
             "payload": { "blob": { "text": "# Hello\nreal file content" } }
         });
         assert_eq!(
-            extract_github_embedded_content(&json).as_deref(),
+            extract_github_embedded_blob_or_readme(&json).as_deref(),
             Some("# Hello\nreal file content")
         );
     }
@@ -964,20 +1324,65 @@ mod tests {
             "payload": { "readme": { "text": "## Readme\nrepo overview" } }
         });
         assert_eq!(
-            extract_github_embedded_content(&json).as_deref(),
+            extract_github_embedded_blob_or_readme(&json).as_deref(),
             Some("## Readme\nrepo overview")
         );
+    }
+
+    /// Blob takes priority over readme when both are present.
+    #[test]
+    fn test_blob_takes_priority_over_readme() {
+        let json: serde_json::Value = serde_json::json!({
+            "payload": {
+                "blob": { "text": "blob content" },
+                "readme": { "text": "readme content" }
+            }
+        });
+        assert_eq!(
+            extract_github_embedded_blob_or_readme(&json).as_deref(),
+            Some("blob content")
+        );
+    }
+
+    /// Blob/readme take priority over discussion.
+    #[test]
+    fn test_blob_takes_priority_over_discussion() {
+        // The caller in extract_clean_content calls blob_or_readme first; discussion
+        // is only reached when blob_or_readme returns None.
+        let json: serde_json::Value = serde_json::json!({
+            "payload": {
+                "blob": { "text": "blob wins" },
+                "discussion": { "title": "ignored discussion", "body": "body" }
+            }
+        });
+        assert_eq!(
+            extract_github_embedded_blob_or_readme(&json).as_deref(),
+            Some("blob wins"),
+            "blob must beat discussion"
+        );
+        // When blob is absent, discussion is returned by the other helper.
+        let json2: serde_json::Value = serde_json::json!({
+            "payload": {
+                "discussion": { "title": "discussion wins", "body": "body text" }
+            }
+        });
+        assert!(extract_github_embedded_blob_or_readme(&json2).is_none());
+        assert!(extract_github_embedded_discussion(&json2).is_some());
     }
 
     #[test]
     fn test_is_json_noise_line_detects_json_fragments() {
         assert!(is_json_noise_line(r#"{"payload":{"a":1,"b":2,"c":3}}"#));
-        assert!(is_json_noise_line(r#"{"allShortcutsEnabled":false,"refInfo":{}}"#));
+        assert!(is_json_noise_line(
+            r#"{"allShortcutsEnabled":false,"refInfo":{}}"#
+        ));
     }
 
     #[test]
     fn test_is_json_noise_line_keeps_prose() {
-        assert!(!is_json_noise_line("This is a regular sentence about Rust scraping."));
+        assert!(!is_json_noise_line(
+            "This is a regular sentence about Rust scraping."
+        ));
         assert!(!is_json_noise_line("## Installation"));
         assert!(!is_json_noise_line(r#"{"a":1}"#)); // short JSON stays
     }
@@ -1000,6 +1405,67 @@ mod tests {
         assert!(text.contains("actual content from blob"));
     }
 
+    #[test]
+    fn test_extract_github_embedded_content_discussion_body_and_comments() {
+        let json: serde_json::Value = serde_json::json!({
+            "payload": {
+                "discussion": {
+                    "title": "How to use the API?",
+                    "body": "I need help using this endpoint.",
+                    "comments": {
+                        "nodes": [
+                            { "body": "Use token auth and retry on 429." },
+                            { "body": "Also check rate-limit headers." }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let out = extract_github_embedded_discussion(&json).unwrap_or_default();
+        assert!(out.contains("How to use the API?"));
+        assert!(out.contains("I need help using this endpoint."));
+        assert!(out.contains("Use token auth and retry on 429."));
+    }
+
+    #[test]
+    fn test_post_clean_text_keeps_short_discussion_lines() {
+        let scraper = RustScraper::new();
+
+        // Includes words currently matched by garbage regex (`share`, `subscribe`)
+        // but this is valid short discussion prose and should be preserved.
+        let input = "Question: why does this fail? Please share logs and subscribe for updates.";
+        let out = scraper.post_clean_text(input);
+
+        assert!(out.contains("Question: why does this fail?"));
+        assert!(out.contains("share logs"));
+        assert!(out.contains("subscribe for updates"));
+    }
+
+    #[test]
+    fn test_post_clean_text_discussion_bypass_still_filters_json_noise() {
+        let scraper = RustScraper::new();
+
+        let input = r#"{"payload":{"a":1,"b":2,"c":3,"d":4,"e":5}}"#;
+        let out = scraper.post_clean_text(input);
+
+        assert!(out.is_empty(), "json-noise lines must still be filtered");
+    }
+
+    #[test]
+    fn test_is_short_discussion_like_text_does_not_match_substrings() {
+        assert!(!is_short_discussion_like_text(
+            "show me the status and however this works"
+        ));
+    }
+
+    #[test]
+    fn test_is_short_discussion_like_text_does_not_trigger_on_url_query_only() {
+        assert!(!is_short_discussion_like_text(
+            "https://example.com/path?utm_source=share"
+        ));
+    }
+
     /// Exercises the ratio branch (2b): line does NOT start with `{` or `[`
     /// but the structural-character ratio is >= 0.55.
     #[test]
@@ -1012,6 +1478,37 @@ mod tests {
         assert!(is_json_noise_line(high_ratio_no_brace));
 
         // Sanity check: a plain-prose line of similar length must NOT trigger.
-        assert!(!is_json_noise_line("This sentence is prose and has no JSON chars."));
+        assert!(!is_json_noise_line(
+            "This sentence is prose and has no JSON chars."
+        ));
+    }
+
+    // -------------------------------------------------------------------------
+    // Task 3: Improve contextual code-block extraction quality
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_code_blocks_prefers_substantive_blocks_over_inline_noise() {
+        use scraper::Html;
+
+        let scraper = RustScraper::new();
+        let html = r#"
+        <html><body>
+          <p>Use <code>ok</code> for quick checks.</p>
+          <pre><code class="language-rust">fn main() { println!("hello"); }</code></pre>
+        </body></html>
+        "#;
+
+        let doc = Html::parse_document(html);
+        let blocks = scraper.extract_code_blocks(&doc);
+
+        assert!(
+            blocks.iter().any(|b| b.code.contains("fn main()")),
+            "substantive code block must be extracted"
+        );
+        assert!(
+            !blocks.iter().any(|b| b.code.trim() == "ok"),
+            "tiny inline code must be filtered out"
+        );
     }
 }
