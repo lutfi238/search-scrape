@@ -375,6 +375,86 @@ impl McpService {
                 annotations: None,
             },
             Tool {
+                name: Cow::Borrowed("crawl_start"),
+                description: Some(Cow::Borrowed("Start an async background crawl job for a website. Returns a job_id immediately; use crawl_status to poll progress and results.\n\nKEY FEATURES:\n• Non-blocking: returns job_id right away while crawl runs in background\n• Website-scoped by design: crawl stays same-domain only\n• Requires absolute http/https URLs\n• Configurable depth, page limit, and URL patterns\n• Poll with crawl_status to get progress counts and paginated results\n• Job results are retained for 24 hours\n\nAGENT BEST PRACTICES:\n1. Use for large crawls where you don't want to block\n2. Poll crawl_status every few seconds until status='completed' or 'failed'\n3. Use include_results=true with offset/limit for paginated result access\n4. For small crawls (<20 pages), crawl_website (synchronous) may be simpler")),
+                input_schema: match serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "Starting URL to crawl. Must be an absolute http/https URL. Crawl is website-scoped (same-domain only)."
+                        },
+                        "max_depth": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 10,
+                            "default": 3,
+                            "description": "Maximum link depth to crawl."
+                        },
+                        "max_pages": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 500,
+                            "default": 50,
+                            "description": "Maximum total pages to crawl."
+                        },
+                        "include_patterns": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Only crawl URLs containing these patterns."
+                        },
+                        "exclude_patterns": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Skip URLs containing these patterns."
+                        }
+                    },
+                    "required": ["url"]
+                }) {
+                    serde_json::Value::Object(map) => std::sync::Arc::new(map),
+                    _ => std::sync::Arc::new(serde_json::Map::new()),
+                },
+                output_schema: None,
+                annotations: None,
+            },
+            Tool {
+                name: Cow::Borrowed("crawl_status"),
+                description: Some(Cow::Borrowed("Poll the status of an async crawl job started with crawl_start. Returns current progress and optionally paginated results.\n\nKEY FEATURES:\n• Returns status: queued | running | completed | failed\n• Progress counters: pages_crawled, pages_total\n• Optional paginated results via include_results + offset/limit\n• Error message available when status=failed\n\nAGENT BEST PRACTICES:\n1. Poll every 2-5 seconds until status='completed' or 'failed'\n2. When completed, fetch results with include_results=true, adjust offset/limit for pagination\n3. Job expires and becomes unavailable after 24 hours")),
+                input_schema: match serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "job_id": {
+                            "type": "string",
+                            "description": "Job ID returned by crawl_start."
+                        },
+                        "include_results": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "If true, include crawled page results in the response."
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 0,
+                            "description": "Offset for paginating results (used with include_results=true)."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 200,
+                            "default": 50,
+                            "description": "Max number of results to return per page (used with include_results=true)."
+                        }
+                    },
+                    "required": ["job_id"]
+                }) {
+                    serde_json::Value::Object(map) => std::sync::Arc::new(map),
+                    _ => std::sync::Arc::new(serde_json::Map::new()),
+                },
+                output_schema: None,
+                annotations: None,
+            },
+            Tool {
                 name: Cow::Borrowed("map_website"),
                 description: Some(Cow::Borrowed("Discover all URLs on a website by crawling and returning a URL list (sitemap-like). Lightweight discovery-only tool -- does not return page content.\n\nKEY FEATURES:\n• Fast URL discovery using BFS crawl\n• Optional search filter to match URLs by substring\n• Subdomain inclusion control\n• Sitemap mode: 'crawl' (default, follows links) or 'sitemap_xml' (parses sitemap.xml)\n• Returns a flat list of discovered URLs\n\nAGENT BEST PRACTICES:\n1. Use to get a site map before targeted scraping\n2. Set limit=100-500 to control output size\n3. Use search filter to narrow results (e.g., '/docs/' or '/blog/')\n4. Set include_subdomains=true to discover across subdomains\n5. For large sites, start with sitemap_mode='sitemap_xml' for fast results")),
                 input_schema: match serde_json::json!({
@@ -428,6 +508,185 @@ impl McpService {
         config.same_domain_only = true;
         config.max_chars_per_page = 100;
         config
+    }
+
+    /// Handle the crawl_start tool: validate args, create job, spawn background crawl, return JSON.
+    /// Returns a JSON string (either CrawlStartResponse or ToolErrorEnvelope).
+    pub async fn handle_crawl_start(&self, args: &serde_json::Map<String, serde_json::Value>) -> String {
+        let url = match args.get("url").and_then(|v| v.as_str()) {
+            Some(u) => u.to_string(),
+            None => {
+                let envelope = crate::types::ToolErrorEnvelope {
+                    code: "INVALID_PARAMS".to_string(),
+                    message: "Missing required parameter: url".to_string(),
+                    details: None,
+                    retryable: false,
+                    request_id_or_job_id: None,
+                };
+                return serde_json::to_string(&envelope)
+                    .unwrap_or_else(|_| r#"{"code":"INTERNAL_ERROR","message":"serialization failed","retryable":false}"#.to_string());
+            }
+        };
+
+        // Validate URL: must parse and must use http or https scheme
+        let parsed_url = match url::Url::parse(&url) {
+            Ok(u) => u,
+            Err(_) => {
+                let envelope = crate::types::ToolErrorEnvelope {
+                    code: "INVALID_PARAMS".to_string(),
+                    message: format!(
+                        "Invalid URL: '{}'. Must be a valid absolute URL with http or https scheme (e.g., https://example.com)",
+                        url
+                    ),
+                    details: None,
+                    retryable: false,
+                    request_id_or_job_id: None,
+                };
+                return serde_json::to_string(&envelope)
+                    .unwrap_or_else(|_| r#"{"code":"INTERNAL_ERROR","message":"serialization failed","retryable":false}"#.to_string());
+            }
+        };
+        if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
+            let envelope = crate::types::ToolErrorEnvelope {
+                code: "INVALID_PARAMS".to_string(),
+                message: format!(
+                    "Unsupported URL scheme '{}': only http and https are supported for crawling",
+                    parsed_url.scheme()
+                ),
+                details: None,
+                retryable: false,
+                request_id_or_job_id: None,
+            };
+            return serde_json::to_string(&envelope)
+                .unwrap_or_else(|_| r#"{"code":"INTERNAL_ERROR","message":"serialization failed","retryable":false}"#.to_string());
+        }
+
+        let max_depth = args.get("max_depth").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(3);
+        let max_pages = args.get("max_pages").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(50);
+
+        let include_patterns: Vec<String> = args
+            .get("include_patterns")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+
+        let exclude_patterns: Vec<String> = args
+            .get("exclude_patterns")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+
+        // Create job record in Queued state
+        let job_id = self.state.crawl_jobs.create_job(url.clone()).await;
+
+        // Build crawl config
+        let mut config = crawl::CrawlConfig::default();
+        config.max_depth = max_depth.min(10);
+        config.max_pages = max_pages.min(500);
+        config.max_concurrent = 5;
+        config.same_domain_only = true;
+        if !include_patterns.is_empty() {
+            config.include_patterns = include_patterns;
+        }
+        if !exclude_patterns.is_empty() {
+            for pattern in exclude_patterns {
+                if !config.exclude_patterns.contains(&pattern) {
+                    config.exclude_patterns.push(pattern);
+                }
+            }
+        }
+
+        // Transition to Running and spawn background task
+        let store = Arc::clone(&self.state.crawl_jobs);
+        let state = Arc::clone(&self.state);
+        let job_id_bg = job_id.clone();
+        let url_bg = url.clone();
+
+        self.state.crawl_jobs.mark_running(&job_id).await;
+
+        tokio::spawn(async move {
+            info!("Background crawl job {} started for {}", job_id_bg, url_bg);
+            match crawl::crawl_website(&state, &url_bg, config).await {
+                Ok(response) => {
+                    let results = response.results;
+                    store.mark_completed(&job_id_bg, results).await;
+                    info!("Background crawl job {} completed", job_id_bg);
+                }
+                Err(e) => {
+                    store.mark_failed(&job_id_bg, e.to_string()).await;
+                    error!("Background crawl job {} failed: {}", job_id_bg, e);
+                }
+            }
+        });
+
+        let response = crate::types::CrawlStartResponse {
+            job_id,
+            status: crate::types::CrawlJobStatus::Running,
+        };
+        serde_json::to_string(&response)
+            .unwrap_or_else(|e| format!(r#"{{"code":"INTERNAL_ERROR","message":"{}","retryable":false}}"#, e))
+    }
+
+    /// Handle the crawl_status tool: fetch job, return JSON status/progress/results.
+    /// Returns a JSON string (either CrawlStatusResponse or ToolErrorEnvelope).
+    pub async fn handle_crawl_status(&self, args: &serde_json::Map<String, serde_json::Value>) -> String {
+        let job_id = match args.get("job_id").and_then(|v| v.as_str()) {
+            Some(id) => id.to_string(),
+            None => {
+                let envelope = crate::types::ToolErrorEnvelope {
+                    code: "INVALID_PARAMS".to_string(),
+                    message: "Missing required parameter: job_id".to_string(),
+                    details: None,
+                    retryable: false,
+                    request_id_or_job_id: None,
+                };
+                return serde_json::to_string(&envelope)
+                    .unwrap_or_else(|_| r#"{"code":"INTERNAL_ERROR","message":"serialization failed","retryable":false}"#.to_string());
+            }
+        };
+
+        let include_results = args.get("include_results").and_then(|v| v.as_bool()).unwrap_or(false);
+        let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(0);
+        let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(50);
+
+        match self.state.crawl_jobs.get_job(&job_id).await {
+            None => {
+                let envelope = crate::types::ToolErrorEnvelope {
+                    code: "JOB_NOT_FOUND".to_string(),
+                    message: format!("No crawl job found with id: {}", job_id),
+                    details: None,
+                    retryable: false,
+                    request_id_or_job_id: Some(job_id),
+                };
+                serde_json::to_string(&envelope)
+                    .unwrap_or_else(|_| r#"{"code":"INTERNAL_ERROR","message":"serialization failed","retryable":false}"#.to_string())
+            }
+            Some(job) => {
+                // Optionally include paginated results
+                let results_page = if include_results {
+                    job.results.as_ref().map(|all| {
+                        all.iter()
+                            .skip(offset)
+                            .take(limit)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                } else {
+                    None
+                };
+
+                let response = crate::types::CrawlStatusResponse {
+                    job_id: job.job_id.clone(),
+                    status: job.status.clone(),
+                    pages_crawled: Some(job.pages_crawled),
+                    pages_total: job.pages_total,
+                    results: results_page,
+                    error: job.error.clone(),
+                };
+                serde_json::to_string(&response)
+                    .unwrap_or_else(|e| format!(r#"{{"code":"INTERNAL_ERROR","message":"{}","retryable":false}}"#, e))
+            }
+        }
     }
 }
 
@@ -1251,6 +1510,24 @@ impl rmcp::ServerHandler for McpService {
                     }
                 }
             }
+            "crawl_start" => {
+                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    "Missing required arguments object",
+                    None,
+                ))?;
+                let json_text = self.handle_crawl_start(args).await;
+                Ok(CallToolResult::success(vec![Content::text(json_text)]))
+            }
+            "crawl_status" => {
+                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    "Missing required arguments object",
+                    None,
+                ))?;
+                let json_text = self.handle_crawl_status(args).await;
+                Ok(CallToolResult::success(vec![Content::text(json_text)]))
+            }
             "map_website" => {
                 let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
                     ErrorCode::INVALID_PARAMS,
@@ -1456,6 +1733,129 @@ mod tests {
         assert_eq!(
             config.max_chars_per_page, 100,
             "map_website should use minimal content extraction (discovery only)"
+        );
+    }
+
+    // --- Task 5: crawl_start and crawl_status tool tests ---
+
+    #[test]
+    fn test_list_tools_contains_crawl_start_and_crawl_status() {
+        let svc = test_service();
+        let tools = svc.tool_definitions();
+        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(
+            tool_names.contains(&"crawl_start"),
+            "Expected 'crawl_start' in tool list, got: {:?}",
+            tool_names
+        );
+        assert!(
+            tool_names.contains(&"crawl_status"),
+            "Expected 'crawl_status' in tool list, got: {:?}",
+            tool_names
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crawl_start_returns_job_id() {
+        let svc = test_service();
+        let args = serde_json::json!({
+            "url": "https://example.com"
+        });
+        let json_text = svc
+            .handle_crawl_start(args.as_object().unwrap())
+            .await;
+        let parsed: serde_json::Value = serde_json::from_str(&json_text)
+            .expect("crawl_start output should be valid JSON");
+        assert!(
+            parsed.get("job_id").is_some(),
+            "crawl_start response must contain job_id, got: {}",
+            json_text
+        );
+        assert_eq!(
+            parsed.get("status").and_then(|v| v.as_str()),
+            Some("running"),
+            "crawl_start response status should be 'running'"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crawl_status_not_found_returns_expected_error() {
+        let svc = test_service();
+        let args = serde_json::json!({
+            "job_id": "nonexistent-job-id-12345"
+        });
+        let json_text = svc
+            .handle_crawl_status(args.as_object().unwrap())
+            .await;
+        let parsed: serde_json::Value = serde_json::from_str(&json_text)
+            .expect("crawl_status output should be valid JSON");
+        assert_eq!(
+            parsed.get("code").and_then(|v| v.as_str()),
+            Some("JOB_NOT_FOUND"),
+            "crawl_status for unknown job should return JOB_NOT_FOUND error envelope, got: {}",
+            json_text
+        );
+        assert_eq!(
+            parsed.get("retryable").and_then(|v| v.as_bool()),
+            Some(false),
+            "JOB_NOT_FOUND should not be retryable"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crawl_start_invalid_url_returns_invalid_params() {
+        let svc = test_service();
+        // An obviously invalid URL (no scheme, no host) should be rejected before any job is created
+        let args = serde_json::json!({ "url": "not a url at all" });
+        let json_text = svc
+            .handle_crawl_start(args.as_object().unwrap())
+            .await;
+        let parsed: serde_json::Value = serde_json::from_str(&json_text)
+            .expect("handle_crawl_start output should be valid JSON");
+        assert_eq!(
+            parsed.get("code").and_then(|v| v.as_str()),
+            Some("INVALID_PARAMS"),
+            "invalid URL must return INVALID_PARAMS error envelope, got: {}",
+            json_text
+        );
+        assert_eq!(
+            parsed.get("retryable").and_then(|v| v.as_bool()),
+            Some(false),
+            "INVALID_PARAMS should not be retryable"
+        );
+        // No job_id field must be present (job was never created)
+        assert!(
+            parsed.get("job_id").is_none(),
+            "no job_id should be returned when URL validation fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crawl_start_non_http_url_rejected() {
+        let svc = test_service();
+        // ftp:// URL parses but must be rejected because only http/https are supported
+        let args = serde_json::json!({ "url": "ftp://example.com/files" });
+        let json_text = svc
+            .handle_crawl_start(args.as_object().unwrap())
+            .await;
+        let parsed: serde_json::Value = serde_json::from_str(&json_text)
+            .expect("handle_crawl_start output should be valid JSON");
+        assert_eq!(
+            parsed.get("code").and_then(|v| v.as_str()),
+            Some("INVALID_PARAMS"),
+            "non-http URL must return INVALID_PARAMS error envelope, got: {}",
+            json_text
+        );
+        // Ensure message mentions scheme restriction
+        let msg = parsed.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg.contains("http") || msg.contains("https"),
+            "error message must mention http/https support, got: {}",
+            msg
+        );
+        assert!(
+            parsed.get("job_id").is_none(),
+            "no job_id should be returned for non-http URL"
         );
     }
 }
