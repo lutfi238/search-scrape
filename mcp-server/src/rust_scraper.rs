@@ -323,6 +323,22 @@ impl RustScraper {
 
     /// Extract clean, readable content using readability, preceded by HTML preprocessing
     fn extract_clean_content(&self, html: &str, base_url: &Url) -> String {
+        // 0) GitHub fast path: read the embedded JSON payload injected by the React app.
+        //    This avoids putting noisy server-rendered HTML through readability entirely.
+        if html.contains("react-app.embeddedData") {
+            if let Ok(sel) = Selector::parse("script[data-target='react-app.embeddedData']") {
+                let doc = Html::parse_document(html);
+                if let Some(el) = doc.select(&sel).next() {
+                    let raw = el.text().collect::<String>();
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if let Some(content) = extract_github_embedded_content(&json) {
+                            return self.post_clean_text(&content);
+                        }
+                    }
+                }
+            }
+        }
+
         // 1) Pre-clean HTML to strip obvious boilerplate and ads before readability
         let pre = self.preprocess_html(html);
 
@@ -963,6 +979,24 @@ mod tests {
         assert!(!is_json_noise_line("This is a regular sentence about Rust scraping."));
         assert!(!is_json_noise_line("## Installation"));
         assert!(!is_json_noise_line(r#"{"a":1}"#)); // short JSON stays
+    }
+
+    #[test]
+    fn test_extract_clean_content_prefers_github_embedded_payload() {
+        let scraper = RustScraper::new();
+        let html = r##"
+    <html><body>
+      <script type="application/json" data-target="react-app.embeddedData">
+        {"payload":{"blob":{"text":"# Title\nactual content from blob"}}}
+      </script>
+      <div>fallback noise</div>
+    </body></html>
+    "##;
+
+        let base = url::Url::parse("https://github.com/org/repo/blob/main/README.md").unwrap();
+        let text = scraper.extract_clean_content(html, &base);
+
+        assert!(text.contains("actual content from blob"));
     }
 
     /// Exercises the ratio branch (2b): line does NOT start with `{` or `[`
