@@ -1482,4 +1482,33 @@ mod tests {
             "This sentence is prose and has no JSON chars."
         ));
     }
+
+    // -------------------------------------------------------------------------
+    // Task 3: Improve contextual code-block extraction quality
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_code_blocks_prefers_substantive_blocks_over_inline_noise() {
+        use scraper::Html;
+
+        let scraper = RustScraper::new();
+        let html = r#"
+        <html><body>
+          <p>Use <code>ok</code> for quick checks.</p>
+          <pre><code class="language-rust">fn main() { println!("hello"); }</code></pre>
+        </body></html>
+        "#;
+
+        let doc = Html::parse_document(html);
+        let blocks = scraper.extract_code_blocks(&doc);
+
+        assert!(
+            blocks.iter().any(|b| b.code.contains("fn main()")),
+            "substantive code block must be extracted"
+        );
+        assert!(
+            !blocks.iter().any(|b| b.code.trim() == "ok"),
+            "tiny inline code must be filtered out"
+        );
+    }
 }
