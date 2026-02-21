@@ -1,3 +1,4 @@
+pub mod batch_jobs;
 pub mod crawl;
 pub mod crawl_jobs;
 pub mod extract;
