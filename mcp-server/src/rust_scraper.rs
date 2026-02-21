@@ -885,11 +885,12 @@ fn extract_github_embedded_content(json: &serde_json::Value) -> Option<String> {
 /// Returns true when a single text line looks like a leaked JSON fragment
 /// rather than human-readable prose, so callers can drop it during post-cleaning.
 ///
-/// Rules (the guard must hold, then either 2a or 2b suffices):
-/// 1. Line is at least 20 characters long (short lines are never noise by this check).
-/// 2a. OR the line starts with `{` or `[` and is longer than 40 chars.
-/// 2b. OR the ratio of structural JSON characters (`{`, `}`, `[`, `]`, `"`, `:`, `,`)
-///     to total characters is >= 0.55.
+/// Rules (the guard must hold, then either branch 2a or 2b suffices):
+///
+/// - Guard: line is at least 20 characters long.
+/// - 2a: line starts with `{` or `[` and is longer than 40 chars.
+/// - 2b: ratio of structural JSON characters (`{`, `}`, `[`, `]`, `"`, `:`, `,`)
+///   to total characters is >= 0.55.
 fn is_json_noise_line(line: &str) -> bool {
     let char_count = line.chars().count();
     if char_count < 20 {
