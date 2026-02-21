@@ -311,6 +311,56 @@ impl McpService {
                 annotations: None,
             },
             Tool {
+                name: Cow::Borrowed("scrape_batch_async"),
+                description: Some(Cow::Borrowed("Start an async batch scrape job. Returns a job_id to poll status.")),
+                input_schema: match serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "urls": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "List of URLs to scrape (max 100)"
+                        },
+                        "max_concurrent": {
+                            "type": "integer",
+                            "description": "Max concurrent requests (default 10, max 50)"
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "description": "Max chars per URL (default 10000)"
+                        }
+                    },
+                    "required": ["urls"]
+                }) {
+                    serde_json::Value::Object(map) => std::sync::Arc::new(map),
+                    _ => std::sync::Arc::new(serde_json::Map::new()),
+                },
+                output_schema: None,
+                annotations: None,
+            },
+            Tool {
+                name: Cow::Borrowed("check_batch_status"),
+                description: Some(Cow::Borrowed("Check status of an async batch scrape job.")),
+                input_schema: match serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "job_id": { "type": "string", "description": "Job ID from scrape_batch_async" },
+                        "include_results": {
+                            "type": "boolean",
+                            "description": "Include results in response (default false)"
+                        },
+                        "offset": { "type": "integer", "description": "Offset for pagination" },
+                        "limit": { "type": "integer", "description": "Limit for pagination (default 50)" }
+                    },
+                    "required": ["job_id"]
+                }) {
+                    serde_json::Value::Object(map) => std::sync::Arc::new(map),
+                    _ => std::sync::Arc::new(serde_json::Map::new()),
+                },
+                output_schema: None,
+                annotations: None,
+            },
+            Tool {
                 name: Cow::Borrowed("crawl_website"),
                 description: Some(Cow::Borrowed("Recursively crawl a website to discover and extract content from multiple pages. Ideal for documentation sites, blogs, or any multi-page content.\n\nKEY FEATURES:\n• BFS crawling with configurable depth (default: 3 levels)\n• Smart link filtering (same domain, exclude patterns)\n• Concurrent page processing for speed\n• Returns sitemap of all discovered URLs\n• Content preview for each page\n• Automatic deduplication of URLs\n\nAGENT BEST PRACTICES:\n1. Start with max_depth=2 and max_pages=20 for exploration\n2. Increase to max_depth=3-5 and max_pages=50-100 for comprehensive crawls\n3. Use include_patterns to focus on specific sections (e.g., ['/docs/', '/guide/'])\n4. Use exclude_patterns to skip unwanted content (e.g., ['/api/', '/changelog/'])\n5. Set same_domain_only=true (default) to avoid crawling external sites\n6. Check 'sitemap' in response for list of all discovered URLs\n\nPERFORMANCE:\n• 20 pages @ depth 2: ~10-20 seconds\n• 50 pages @ depth 3: ~30-60 seconds\n• Uses caching - repeated URLs are fast")),
                 input_schema: match serde_json::json!({
@@ -479,6 +529,49 @@ impl McpService {
                         }
                     },
                     "required": ["query"]
+                }) {
+                    serde_json::Value::Object(map) => std::sync::Arc::new(map),
+                    _ => std::sync::Arc::new(serde_json::Map::new()),
+                },
+                output_schema: None,
+                annotations: None,
+            },
+            Tool {
+                name: Cow::Borrowed("deep_research_async"),
+                description: Some(Cow::Borrowed("Start an async deep research job. Returns a job_id to poll status.")),
+                input_schema: match serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Research query" },
+                        "max_search_results": { "type": "integer" },
+                        "crawl_depth": { "type": "integer" },
+                        "max_pages_per_site": { "type": "integer" },
+                        "language": { "type": "string" },
+                        "time_range": { "type": "string" },
+                        "include_domains": { "type": "array", "items": { "type": "string" } },
+                        "exclude_domains": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "required": ["query"]
+                }) {
+                    serde_json::Value::Object(map) => std::sync::Arc::new(map),
+                    _ => std::sync::Arc::new(serde_json::Map::new()),
+                },
+                output_schema: None,
+                annotations: None,
+            },
+            Tool {
+                name: Cow::Borrowed("check_agent_status"),
+                description: Some(Cow::Borrowed("Check status of an async deep research job.")),
+                input_schema: match serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "job_id": { "type": "string", "description": "Job ID from deep_research_async" },
+                        "include_results": {
+                            "type": "boolean",
+                            "description": "Include final report in response (default false)"
+                        }
+                    },
+                    "required": ["job_id"]
                 }) {
                     serde_json::Value::Object(map) => std::sync::Arc::new(map),
                     _ => std::sync::Arc::new(serde_json::Map::new()),
@@ -1454,6 +1547,117 @@ impl rmcp::ServerHandler for McpService {
                     }
                 }
             }
+            "scrape_batch_async" => {
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required arguments object",
+                        None,
+                    )
+                })?;
+
+                let urls: Vec<String> = args
+                    .get("urls")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .ok_or_else(|| {
+                        ErrorData::new(
+                            ErrorCode::INVALID_PARAMS,
+                            "Missing required parameter: urls (array of strings)",
+                            None,
+                        )
+                    })?;
+
+                if urls.is_empty() {
+                    return Ok(Self::tool_error_result(
+                        "INVALID_PARAMS",
+                        "urls array cannot be empty".to_string(),
+                        false,
+                        None,
+                    ));
+                }
+
+                if urls.len() > 100 {
+                    return Ok(Self::tool_error_result(
+                        "INVALID_PARAMS",
+                        format!("Maximum 100 URLs per request, got {}", urls.len()),
+                        false,
+                        None,
+                    ));
+                }
+
+                let max_concurrent = args
+                    .get("max_concurrent")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize);
+                let max_chars = args
+                    .get("max_chars")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize);
+
+                match scrape::scrape_batch_async(&self.state, urls, max_concurrent, max_chars).await {
+                    Ok(response) => {
+                        let json_str = serde_json::to_string_pretty(&response).unwrap_or_else(|e| {
+                            format!(r#"{{"error": "Failed to serialize: {}"}}"#, e)
+                        });
+                        Ok(CallToolResult::success(vec![Content::text(json_str)]))
+                    }
+                    Err(e) => {
+                        error!("Async batch scrape error: {}", e);
+                        Ok(Self::tool_error_result(
+                            "SCRAPE_ERROR",
+                            e.to_string(),
+                            false,
+                            None,
+                        ))
+                    }
+                }
+            }
+            "check_batch_status" => {
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required arguments object",
+                        None,
+                    )
+                })?;
+
+                let job_id = args.get("job_id").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required parameter: job_id",
+                        None,
+                    )
+                })?;
+
+                let include_results = args.get("include_results").and_then(|v| v.as_bool());
+                let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as usize);
+                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
+
+                match scrape::check_batch_status(&self.state, job_id, include_results, offset, limit)
+                    .await
+                {
+                    Ok(response) => {
+                        let json_str = serde_json::to_string_pretty(&response).unwrap_or_else(|e| {
+                            format!(r#"{{"error": "Failed to serialize: {}"}}"#, e)
+                        });
+                        Ok(CallToolResult::success(vec![Content::text(json_str)]))
+                    }
+                    Err(e) => {
+                        error!("Batch status error: {}", e);
+                        Ok(Self::tool_error_result(
+                            "BATCH_STATUS_ERROR",
+                            e.to_string(),
+                            false,
+                            None,
+                        ))
+                    }
+                }
+            }
             "crawl_website" => {
                 let args = request.arguments.as_ref().ok_or_else(|| {
                     ErrorData::new(
@@ -1959,6 +2163,118 @@ impl rmcp::ServerHandler for McpService {
                         error!("Deep research error: {}", e);
                         Ok(Self::tool_error_result(
                             "DEEP_RESEARCH_FAILED",
+                            e.to_string(),
+                            false,
+                            None,
+                        ))
+                    }
+                }
+            }
+            "deep_research_async" => {
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required arguments object",
+                        None,
+                    )
+                })?;
+
+                let query = args.get("query").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required parameter: query",
+                        None,
+                    )
+                })?;
+
+                let config = crate::types::ResearchJobRequest {
+                    query: query.to_string(),
+                    max_search_results: args
+                        .get("max_search_results")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize),
+                    crawl_depth: args
+                        .get("crawl_depth")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize),
+                    max_pages_per_site: args
+                        .get("max_pages_per_site")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize),
+                    language: args
+                        .get("language")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    time_range: args
+                        .get("time_range")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    include_domains: args
+                        .get("include_domains")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        }),
+                    exclude_domains: args
+                        .get("exclude_domains")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        }),
+                };
+
+                match research::deep_research_async(&self.state, query.to_string(), config).await {
+                    Ok(response) => {
+                        let json_str = serde_json::to_string_pretty(&response).unwrap_or_else(|e| {
+                            format!(r#"{{"error": "Failed to serialize: {}"}}"#, e)
+                        });
+                        Ok(CallToolResult::success(vec![Content::text(json_str)]))
+                    }
+                    Err(e) => {
+                        error!("Async deep research error: {}", e);
+                        Ok(Self::tool_error_result(
+                            "RESEARCH_ERROR",
+                            e.to_string(),
+                            false,
+                            None,
+                        ))
+                    }
+                }
+            }
+            "check_agent_status" => {
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required arguments object",
+                        None,
+                    )
+                })?;
+
+                let job_id = args.get("job_id").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required parameter: job_id",
+                        None,
+                    )
+                })?;
+
+                let include_results = args.get("include_results").and_then(|v| v.as_bool());
+
+                match research::check_agent_status(&self.state, job_id, include_results).await {
+                    Ok(response) => {
+                        let json_str = serde_json::to_string_pretty(&response).unwrap_or_else(|e| {
+                            format!(r#"{{"error": "Failed to serialize: {}"}}"#, e)
+                        });
+                        Ok(CallToolResult::success(vec![Content::text(json_str)]))
+                    }
+                    Err(e) => {
+                        error!("Agent status error: {}", e);
+                        Ok(Self::tool_error_result(
+                            "AGENT_STATUS_ERROR",
                             e.to_string(),
                             false,
                             None,
