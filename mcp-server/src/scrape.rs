@@ -10,13 +10,60 @@ use select::predicate::Predicate;
 use crate::rust_scraper::RustScraper;
 use futures::stream::{self, StreamExt};
 
+/// Rewrite GitHub blob URLs to raw.githubusercontent.com for clean content fetch.
+/// Returns `Some(rewritten_url)` for blob URLs, `None` for all other URLs.
+///
+/// Only rewrites when ALL of the following are true:
+///   1. The parsed host is exactly "github.com" (no subdomains, no lookalike hosts).
+///   2. The URL *path* (not query string) contains the "/blob/" segment.
+///   3. The URL is not already a raw.githubusercontent.com URL.
+fn rewrite_url_for_clean_content(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+
+    // Guard 1: exact host match — no subdomains, no lookalike hosts.
+    if parsed.host_str() != Some("github.com") {
+        return None;
+    }
+
+    // Guard 2: "/blob/" must appear in the *path*, not the query string.
+    let path = parsed.path();
+    let blob_seg = "/blob/";
+    let blob_pos = path.find(blob_seg)?;
+
+    // Guard 3: not already a raw URL (defensive; host check above already excludes it).
+    // (This is implicitly satisfied by guard 1, but kept for clarity.)
+
+    // Build the raw URL: swap host, drop "/blob" from the path segment.
+    let repo_path = &path[..blob_pos];          // e.g. "/microsoft/vscode"
+    let after_blob = &path[blob_pos + "/blob".len()..]; // e.g. "/main/README.md"
+
+    // Preserve query and fragment if present (unlikely for blob URLs, but safe).
+    let query_frag = match (parsed.query(), parsed.fragment()) {
+        (Some(q), Some(f)) => format!("?{}#{}", q, f),
+        (Some(q), None)    => format!("?{}", q),
+        (None,    Some(f)) => format!("#{}", f),
+        (None,    None)    => String::new(),
+    };
+
+    Some(format!(
+        "{}://raw.githubusercontent.com{}{}{}",
+        parsed.scheme(),
+        repo_path,
+        after_blob,
+        query_frag,
+    ))
+}
+
 pub async fn scrape_url(state: &Arc<AppState>, url: &str) -> Result<ScrapeResponse> {
     info!("Scraping URL: {}", url);
-    
-    // Validate URL
+
+    // Validate the original input URL before any rewrite so callers get a clear
+    // error for malformed input rather than a confusingly-rewritten one.
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(anyhow!("Invalid URL: must start with http:// or https://"));
     }
+
+    let fetch_url = rewrite_url_for_clean_content(url).unwrap_or_else(|| url.to_string());
 
     // Check cache
     if let Some(cached) = state.scrape_cache.get(url).await {
@@ -41,7 +88,7 @@ pub async fn scrape_url(state: &Arc<AppState>, url: &str) -> Result<ScrapeRespon
             .with_max_elapsed_time(Some(std::time::Duration::from_secs(6)))
             .build(),
         || async {
-            match rust_scraper.scrape_url(&url_owned).await {
+            match rust_scraper.scrape_url(&fetch_url).await {
                 Ok(r) => Ok(r),
                 Err(e) => {
                     // Treat network/temporary HTML parse errors as transient
@@ -52,11 +99,16 @@ pub async fn scrape_url(state: &Arc<AppState>, url: &str) -> Result<ScrapeRespon
     ).await?;
     if result.word_count == 0 || result.clean_content.trim().is_empty() {
         info!("Rust-native scraper returned empty content, using fallback for {}", url);
-        result = scrape_url_fallback(state, &url_owned).await?;
+        result = scrape_url_fallback(state, &fetch_url).await?;
     } else {
         info!("Rust-native scraper succeeded for {}", url);
     }
-    state.scrape_cache.insert(url.to_string(), result.clone()).await;
+
+    // Keep public response URL stable: always return the caller-requested URL,
+    // even when we internally fetch via rewritten raw.githubusercontent.com URL.
+    result.url = url_owned.clone();
+
+    state.scrape_cache.insert(url_owned.clone(), result.clone()).await;
     
     // Auto-log to history if memory is enabled (Phase 1)
     if let Some(memory) = &state.memory {
@@ -301,7 +353,76 @@ pub async fn scrape_batch(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    
+
+    #[test]
+    fn test_rewrite_url_for_clean_content_github_blob() {
+        let input = "https://github.com/microsoft/vscode/blob/main/README.md";
+        let rewritten = rewrite_url_for_clean_content(input);
+        assert_eq!(
+            rewritten.as_deref(),
+            Some("https://raw.githubusercontent.com/microsoft/vscode/main/README.md")
+        );
+    }
+
+    #[test]
+    fn test_rewrite_url_for_clean_content_non_blob_is_none() {
+        assert!(rewrite_url_for_clean_content("https://github.com/user/repo").is_none());
+        assert!(rewrite_url_for_clean_content("https://github.com/user/repo/issues/1").is_none());
+        assert!(rewrite_url_for_clean_content("https://raw.githubusercontent.com/user/repo/main/a.rs").is_none());
+    }
+
+    /// A host that merely contains "github.com" as a substring (e.g. "notgithub.com") must NOT be rewritten.
+    #[test]
+    fn test_rewrite_url_non_github_host_substring_should_not_rewrite() {
+        // Host is "notgithub.com", not exactly "github.com"
+        let url = "https://notgithub.com/user/repo/blob/main/README.md";
+        assert!(
+            rewrite_url_for_clean_content(url).is_none(),
+            "hosts that merely contain 'github.com' as a substring must not be rewritten"
+        );
+    }
+
+    /// A GitHub Enterprise host (e.g. "github.mycompany.com") must NOT be rewritten.
+    #[test]
+    fn test_rewrite_url_github_enterprise_host_should_not_rewrite() {
+        let url = "https://github.mycompany.com/user/repo/blob/main/README.md";
+        assert!(
+            rewrite_url_for_clean_content(url).is_none(),
+            "github enterprise hosts must not be rewritten (only github.com exactly)"
+        );
+    }
+
+    /// A URL where '/blob/' appears only in the query string must NOT be rewritten.
+    #[test]
+    fn test_rewrite_url_blob_in_query_string_should_not_rewrite() {
+        // The path is "/search", the query string contains "/blob/"
+        let url = "https://github.com/search?q=%2Fblob%2Fmain&type=code";
+        assert!(
+            rewrite_url_for_clean_content(url).is_none(),
+            "'/blob/' appearing only in the query string must not trigger a rewrite"
+        );
+        // Unencoded variant just in case a caller passes it raw
+        let url2 = "https://github.com/search?q=/blob/main&type=code";
+        assert!(
+            rewrite_url_for_clean_content(url2).is_none(),
+            "unencoded '/blob/' in query string must not trigger a rewrite"
+        );
+    }
+
+    /// After rewriting, the original URL is preserved in ScrapeResponse.url.
+    /// We test rewrite_url_for_clean_content produces a raw URL so the caller can
+    /// still use the original URL when constructing the response.
+    #[test]
+    fn test_rewrite_returns_raw_url_while_original_is_separate() {
+        let original = "https://github.com/rust-lang/rust/blob/master/src/lib.rs";
+        let rewritten = rewrite_url_for_clean_content(original);
+        assert!(rewritten.is_some(), "should produce a rewritten URL for valid blob path");
+        let rw = rewritten.unwrap();
+        assert!(rw.contains("raw.githubusercontent.com"), "rewritten URL must use raw host");
+        // The original URL must not equal the rewritten URL
+        assert_ne!(rw, original, "rewritten URL must differ from original");
+    }
+
     #[tokio::test]
     async fn test_scrape_url_fallback() {
         let state = Arc::new(AppState::new(
