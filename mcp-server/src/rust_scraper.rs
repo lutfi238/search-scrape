@@ -510,10 +510,15 @@ impl RustScraper {
         cleaned.trim().to_string()
     }
 
-    /// Final post-processing to strip boilerplate lines, trackers, CTA, share/cookie prompts
+    /// Final post-processing to strip boilerplate lines, trackers, CTA, share/cookie prompts.
+    ///
+    /// For short discussion-like snippets we bypass keyword-based boilerplate stripping,
+    /// because words like "share" or "subscribe" can be meaningful conversation content.
+    /// JSON-noise filtering remains active in all modes.
     fn post_clean_text(&self, text: &str) -> String {
         // Normalize first
-    let out = self.clean_text(text);
+        let out = self.clean_text(text);
+        let bypass_garbage_filter = is_short_discussion_like_text(&out);
 
         // Drop lines matching common garbage patterns
         let garbage = [
@@ -526,11 +531,21 @@ impl RustScraper {
         let mut kept = Vec::new();
         for line in out.split('\n') {
             let line_trim = line.trim();
-            if line_trim.is_empty() { continue; }
-            // Remove very short noisy lines and those matching garbage
-            if line_trim.len() < 3 { continue; }
-            if re_garbage.is_match(line_trim) { continue; }
-            if is_json_noise_line(line_trim) { continue; }
+            if line_trim.is_empty() {
+                continue;
+            }
+            // Remove very short noisy lines
+            if line_trim.len() < 3 {
+                continue;
+            }
+            // Always filter JSON fragments, even in discussion bypass mode.
+            if is_json_noise_line(line_trim) {
+                continue;
+            }
+            // Only apply keyword-garbage filtering when not in short discussion mode.
+            if !bypass_garbage_filter && re_garbage.is_match(line_trim) {
+                continue;
+            }
             kept.push(line_trim.to_string());
         }
 
@@ -945,6 +960,28 @@ fn non_empty_str(v: Option<&serde_json::Value>) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+/// Heuristic gate for short discussion-like text snippets.
+///
+/// We only bypass keyword-based garbage filtering when text is short and looks like
+/// conversational content (question/answer wording), not boilerplate blobs.
+fn is_short_discussion_like_text(text: &str) -> bool {
+    let words = text.split_whitespace().count();
+    if words == 0 || words > 80 {
+        return false;
+    }
+
+    let lower = text.to_ascii_lowercase();
+
+    // Require at least one conversation marker to avoid broad bypass.
+    if lower.contains('?') {
+        return true;
+    }
+
+    ["question", "answer", "issue", "help", "thanks", "please", "why", "how"]
+        .iter()
+        .any(|k| lower.contains(k))
+}
+
 /// Returns true when a single text line looks like a leaked JSON fragment
 /// rather than human-readable prose, so callers can drop it during post-cleaning.
 ///
@@ -1220,6 +1257,30 @@ mod tests {
         assert!(out.contains("How to use the API?"));
         assert!(out.contains("I need help using this endpoint."));
         assert!(out.contains("Use token auth and retry on 429."));
+    }
+
+    #[test]
+    fn test_post_clean_text_keeps_short_discussion_lines() {
+        let scraper = RustScraper::new();
+
+        // Includes words currently matched by garbage regex (`share`, `subscribe`)
+        // but this is valid short discussion prose and should be preserved.
+        let input = "Question: why does this fail? Please share logs and subscribe for updates.";
+        let out = scraper.post_clean_text(input);
+
+        assert!(out.contains("Question: why does this fail?"));
+        assert!(out.contains("share logs"));
+        assert!(out.contains("subscribe for updates"));
+    }
+
+    #[test]
+    fn test_post_clean_text_discussion_bypass_still_filters_json_noise() {
+        let scraper = RustScraper::new();
+
+        let input = r#"{"payload":{"a":1,"b":2,"c":3,"d":4,"e":5}}"#;
+        let out = scraper.post_clean_text(input);
+
+        assert!(out.is_empty(), "json-noise lines must still be filtered");
     }
 
     /// Exercises the ratio branch (2b): line does NOT start with `{` or `[`
