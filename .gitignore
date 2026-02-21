@@ -19,3 +19,4 @@ scrapy-service/webspider/.scrapy/
 CLAUDE.md
 
 .worktrees/
+mcp-server/mcp.env
