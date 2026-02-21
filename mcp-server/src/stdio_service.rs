@@ -1,9 +1,10 @@
+use crate::{crawl, extract, history, research, scrape, search, AppState};
+use regex::Regex;
 use rmcp::{model::*, ServiceExt};
+use std::borrow::Cow;
 use std::env;
 use std::sync::Arc;
 use tracing::{error, info, warn};
-use std::borrow::Cow;
-use crate::{search, scrape, crawl, extract, research, AppState, history};
 
 #[derive(Clone, Debug)]
 pub struct McpService {
@@ -11,14 +12,63 @@ pub struct McpService {
 }
 
 impl McpService {
+    fn redact_secrets(input: &str) -> String {
+        // Redact common key=value secret patterns (api_key, token, password, secret).
+        let key_value_re =
+            Regex::new(r#"(?i)(api[_-]?key|token|password|secret)\s*[:=]\s*[^,\s\}\]"]+"#)
+                .expect("key/value regex compiles");
+        let mut out = key_value_re.replace_all(input, "$1=[REDACTED]").to_string();
+
+        // Redact bearer tokens.
+        let bearer_re =
+            Regex::new(r"(?i)Bearer\s+[A-Za-z0-9._\-~+/]+=*").expect("bearer regex compiles");
+        out = bearer_re.replace_all(&out, "Bearer [REDACTED]").to_string();
+
+        // Redact likely OpenAI-style secret keys.
+        let sk_re =
+            Regex::new(r"\bsk-[A-Za-z0-9][A-Za-z0-9._\-]{8,}\b").expect("sk regex compiles");
+        out = sk_re.replace_all(&out, "[REDACTED_KEY]").to_string();
+
+        out
+    }
+
+    fn tool_error_json(
+        code: &str,
+        message: String,
+        retryable: bool,
+        request_id_or_job_id: Option<String>,
+    ) -> String {
+        let envelope = crate::types::ToolErrorEnvelope {
+            code: code.to_string(),
+            message: Self::redact_secrets(&message),
+            details: None,
+            retryable,
+            request_id_or_job_id,
+        };
+        serde_json::to_string(&envelope).unwrap_or_else(|_| {
+            r#"{"code":"INTERNAL_ERROR","message":"serialization failed","retryable":false}"#
+                .to_string()
+        })
+    }
+
+    fn tool_error_result(
+        code: &str,
+        message: impl Into<String>,
+        retryable: bool,
+        request_id_or_job_id: Option<String>,
+    ) -> CallToolResult {
+        let json = Self::tool_error_json(code, message.into(), retryable, request_id_or_job_id);
+        CallToolResult::success(vec![Content::text(json)])
+    }
+
     pub async fn new() -> anyhow::Result<Self> {
         tracing_subscriber::fmt()
             .with_writer(std::io::stderr)
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .init();
 
-        let searxng_url = env::var("SEARXNG_URL")
-            .unwrap_or_else(|_| "http://localhost:8888".to_string());
+        let searxng_url =
+            env::var("SEARXNG_URL").unwrap_or_else(|_| "http://localhost:8888".to_string());
 
         info!("Starting MCP Service");
         info!("SearXNG URL: {}", searxng_url);
@@ -38,14 +88,19 @@ impl McpService {
                     info!("Memory initialized successfully");
                 }
                 Err(e) => {
-                    warn!("Failed to initialize memory: {}. Continuing without memory feature.", e);
+                    warn!(
+                        "Failed to initialize memory: {}. Continuing without memory feature.",
+                        e
+                    );
                 }
             }
         } else {
             info!("QDRANT_URL not set. Memory feature disabled.");
         }
 
-        Ok(Self { state: Arc::new(state) })
+        Ok(Self {
+            state: Arc::new(state),
+        })
     }
 
     /// Returns all tool definitions. Extracted for testability.
@@ -262,7 +317,7 @@ impl McpService {
             },
             Tool {
                 name: Cow::Borrowed("extract_structured"),
-                description: Some(Cow::Borrowed("Extract structured JSON data from a webpage using schema definitions or natural language prompts. No external LLM required - uses intelligent pattern matching.\n\nKEY FEATURES:\n• Schema-based extraction: Define fields with names, types, and descriptions\n• Prompt-based extraction: Describe what you want in natural language\n• Auto-detection: Automatically finds emails, prices, dates, phones\n• Built-in patterns: Products, articles, contacts, code blocks\n• Metadata included: Title, author, publish date, word count\n\nEXTRACTION TYPES:\n• string: Text content\n• number: Numeric values\n• boolean: True/false\n• array: Lists of items\n• object: Nested structures\n\nBUILT-IN FIELDS (use these names for automatic extraction):\n• title, description, author, date, published\n• price, email, phone\n• links, headings, images, code_blocks\n\nUSE CASES:\n• Product pages: Extract name, price, description, images\n• Articles: Extract title, author, date, content summary\n• Contact pages: Extract emails, phones, addresses\n• Documentation: Extract headings, code examples")),
+                description: Some(Cow::Borrowed("Extract structured JSON data from a webpage using a BYO (Bring Your Own) LLM.\n\nREQUIRED CONFIGURATION:\nThis tool requires an OpenAI-compatible LLM configured via environment variables:\n  LLM_BASE_URL  - Provider endpoint (e.g., https://api.openai.com/v1 or http://localhost:11434/v1)\n  LLM_API_KEY   - API key for the provider (use 'ollama' for local Ollama)\n  LLM_MODEL     - Model name (e.g., gpt-4o, gpt-4o-mini, llama3, mistral)\n\nOptional LLM tuning:\n  LLM_TIMEOUT_MS    - Request timeout in milliseconds (default: 60000)\n  LLM_MAX_TOKENS    - Max tokens in LLM response\n  LLM_TEMPERATURE   - Sampling temperature (e.g., 0.0 for deterministic)\n\nIf LLM_BASE_URL, LLM_API_KEY, or LLM_MODEL are not set, this tool returns LLM_NOT_CONFIGURED error.\n\nKEY FEATURES:\n• Schema-based extraction: Define fields with names, types, and descriptions sent to LLM\n• Prompt-based extraction: Describe what you want in natural language\n• Auto mode: LLM extracts all meaningful structured data from the page\n• Scrapes the URL first, then sends content to LLM for JSON extraction\n• LLM response is parsed and validated as JSON\n\nEXTRACTION TYPES (for schema fields):\n• string: Text content\n• number: Numeric values\n• boolean: True/false\n• array: Lists of items\n• object: Nested structures\n\nUSE CASES:\n• Product pages: Extract name, price, description, images\n• Articles: Extract title, author, date, content summary\n• Contact pages: Extract emails, phones, addresses\n• Documentation: Extract headings, code examples\n\nERROR CODES:\n• LLM_NOT_CONFIGURED: Missing LLM env vars\n• LLM_AUTH_FAILED: Invalid API key\n• LLM_RATE_LIMITED: Provider rate limit hit\n• LLM_TIMEOUT: LLM request timed out\n• LLM_INVALID_JSON: LLM returned unparseable JSON\n• EXTRACT_FAILED: Unexpected extraction failure")),
                 input_schema: match serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -501,30 +556,31 @@ impl McpService {
     /// Build a CrawlConfig for the map_website tool.
     /// Always website-scoped: same_domain_only is always true.
     pub fn build_map_crawl_config(limit: usize, _include_subdomains: bool) -> crawl::CrawlConfig {
-        let mut config = crawl::CrawlConfig::default();
-        config.max_pages = limit.min(5000);
-        config.max_depth = 5;
-        config.max_concurrent = 10;
-        config.same_domain_only = true;
-        config.max_chars_per_page = 100;
-        config
+        crawl::CrawlConfig {
+            max_pages: limit.min(5000),
+            max_depth: 5,
+            max_concurrent: 10,
+            same_domain_only: true,
+            max_chars_per_page: 100,
+            ..crawl::CrawlConfig::default()
+        }
     }
 
     /// Handle the crawl_start tool: validate args, create job, spawn background crawl, return JSON.
     /// Returns a JSON string (either CrawlStartResponse or ToolErrorEnvelope).
-    pub async fn handle_crawl_start(&self, args: &serde_json::Map<String, serde_json::Value>) -> String {
+    pub async fn handle_crawl_start(
+        &self,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
         let url = match args.get("url").and_then(|v| v.as_str()) {
             Some(u) => u.to_string(),
             None => {
-                let envelope = crate::types::ToolErrorEnvelope {
-                    code: "INVALID_PARAMS".to_string(),
-                    message: "Missing required parameter: url".to_string(),
-                    details: None,
-                    retryable: false,
-                    request_id_or_job_id: None,
-                };
-                return serde_json::to_string(&envelope)
-                    .unwrap_or_else(|_| r#"{"code":"INTERNAL_ERROR","message":"serialization failed","retryable":false}"#.to_string());
+                return Self::tool_error_json(
+                    "INVALID_PARAMS",
+                    "Missing required parameter: url".to_string(),
+                    false,
+                    None,
+                );
             }
         };
 
@@ -532,59 +588,71 @@ impl McpService {
         let parsed_url = match url::Url::parse(&url) {
             Ok(u) => u,
             Err(_) => {
-                let envelope = crate::types::ToolErrorEnvelope {
-                    code: "INVALID_PARAMS".to_string(),
-                    message: format!(
+                return Self::tool_error_json(
+                    "INVALID_PARAMS",
+                    format!(
                         "Invalid URL: '{}'. Must be a valid absolute URL with http or https scheme (e.g., https://example.com)",
                         url
                     ),
-                    details: None,
-                    retryable: false,
-                    request_id_or_job_id: None,
-                };
-                return serde_json::to_string(&envelope)
-                    .unwrap_or_else(|_| r#"{"code":"INTERNAL_ERROR","message":"serialization failed","retryable":false}"#.to_string());
+                    false,
+                    None,
+                );
             }
         };
         if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
-            let envelope = crate::types::ToolErrorEnvelope {
-                code: "INVALID_PARAMS".to_string(),
-                message: format!(
+            return Self::tool_error_json(
+                "INVALID_PARAMS",
+                format!(
                     "Unsupported URL scheme '{}': only http and https are supported for crawling",
                     parsed_url.scheme()
                 ),
-                details: None,
-                retryable: false,
-                request_id_or_job_id: None,
-            };
-            return serde_json::to_string(&envelope)
-                .unwrap_or_else(|_| r#"{"code":"INTERNAL_ERROR","message":"serialization failed","retryable":false}"#.to_string());
+                false,
+                None,
+            );
         }
 
-        let max_depth = args.get("max_depth").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(3);
-        let max_pages = args.get("max_pages").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(50);
+        let max_depth = args
+            .get("max_depth")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(3);
+        let max_pages = args
+            .get("max_pages")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(50);
 
         let include_patterns: Vec<String> = args
             .get("include_patterns")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let exclude_patterns: Vec<String> = args
             .get("exclude_patterns")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         // Create job record in Queued state
         let job_id = self.state.crawl_jobs.create_job(url.clone()).await;
 
         // Build crawl config
-        let mut config = crawl::CrawlConfig::default();
-        config.max_depth = max_depth.min(10);
-        config.max_pages = max_pages.min(500);
-        config.max_concurrent = 5;
-        config.same_domain_only = true;
+        let mut config = crawl::CrawlConfig {
+            max_depth: max_depth.min(10),
+            max_pages: max_pages.min(500),
+            max_concurrent: 5,
+            same_domain_only: true,
+            ..crawl::CrawlConfig::default()
+        };
         if !include_patterns.is_empty() {
             config.include_patterns = include_patterns;
         }
@@ -624,43 +692,49 @@ impl McpService {
             status: crate::types::CrawlJobStatus::Running,
         };
         serde_json::to_string(&response)
-            .unwrap_or_else(|e| format!(r#"{{"code":"INTERNAL_ERROR","message":"{}","retryable":false}}"#, e))
+            .unwrap_or_else(|e| Self::tool_error_json("INTERNAL_ERROR", e.to_string(), false, None))
     }
 
     /// Handle the crawl_status tool: fetch job, return JSON status/progress/results.
     /// Returns a JSON string (either CrawlStatusResponse or ToolErrorEnvelope).
-    pub async fn handle_crawl_status(&self, args: &serde_json::Map<String, serde_json::Value>) -> String {
+    pub async fn handle_crawl_status(
+        &self,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
         let job_id = match args.get("job_id").and_then(|v| v.as_str()) {
             Some(id) => id.to_string(),
             None => {
-                let envelope = crate::types::ToolErrorEnvelope {
-                    code: "INVALID_PARAMS".to_string(),
-                    message: "Missing required parameter: job_id".to_string(),
-                    details: None,
-                    retryable: false,
-                    request_id_or_job_id: None,
-                };
-                return serde_json::to_string(&envelope)
-                    .unwrap_or_else(|_| r#"{"code":"INTERNAL_ERROR","message":"serialization failed","retryable":false}"#.to_string());
+                return Self::tool_error_json(
+                    "INVALID_PARAMS",
+                    "Missing required parameter: job_id".to_string(),
+                    false,
+                    None,
+                );
             }
         };
 
-        let include_results = args.get("include_results").and_then(|v| v.as_bool()).unwrap_or(false);
-        let offset = args.get("offset").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(0);
-        let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(50);
+        let include_results = args
+            .get("include_results")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let offset = args
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(0);
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(50);
 
         match self.state.crawl_jobs.get_job(&job_id).await {
-            None => {
-                let envelope = crate::types::ToolErrorEnvelope {
-                    code: "JOB_NOT_FOUND".to_string(),
-                    message: format!("No crawl job found with id: {}", job_id),
-                    details: None,
-                    retryable: false,
-                    request_id_or_job_id: Some(job_id),
-                };
-                serde_json::to_string(&envelope)
-                    .unwrap_or_else(|_| r#"{"code":"INTERNAL_ERROR","message":"serialization failed","retryable":false}"#.to_string())
-            }
+            None => Self::tool_error_json(
+                "JOB_NOT_FOUND",
+                format!("No crawl job found with id: {}", job_id),
+                false,
+                Some(job_id),
+            ),
             Some(job) => {
                 // Optionally include paginated results
                 let results_page = if include_results {
@@ -683,8 +757,9 @@ impl McpService {
                     results: results_page,
                     error: job.error.clone(),
                 };
-                serde_json::to_string(&response)
-                    .unwrap_or_else(|e| format!(r#"{{"code":"INTERNAL_ERROR","message":"{}","retryable":false}}"#, e))
+                serde_json::to_string(&response).unwrap_or_else(|e| {
+                    Self::tool_error_json("INTERNAL_ERROR", e.to_string(), false, None)
+                })
             }
         }
     }
@@ -724,44 +799,90 @@ impl rmcp::ServerHandler for McpService {
         request: CallToolRequestParam,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        info!("MCP tool call: {} with args: {:?}", request.name, request.arguments);
+        info!(
+            "MCP tool call: {} with args: {:?}",
+            request.name, request.arguments
+        );
         match request.name.as_ref() {
             "search_web" => {
-                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
-                    ErrorCode::INVALID_PARAMS,
-                    "Missing required arguments object",
-                    None,
-                ))?;
-                let query = args
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| ErrorData::new(
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required arguments object",
+                        None,
+                    )
+                })?;
+                let query = args.get("query").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ErrorData::new(
                         ErrorCode::INVALID_PARAMS,
                         "Missing required parameter: query",
                         None,
-                    ))?;
-                
-                let engines = args.get("engines").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let categories = args.get("categories").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let language = args.get("language").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let time_range = args.get("time_range").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let safesearch = args.get("safesearch").and_then(|v| v.as_i64()).and_then(|n| if (0..=2).contains(&n) { Some(n as u8) } else { None });
-                let pageno = args.get("pageno").and_then(|v| v.as_u64()).map(|n| n as u32);
+                    )
+                })?;
 
-                let max_results = args.get("max_results").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(10);
-                let overrides = crate::search::SearchParamOverrides { engines, categories, language, safesearch, time_range, pageno };
+                let engines = args
+                    .get("engines")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let categories = args
+                    .get("categories")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let language = args
+                    .get("language")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let time_range = args
+                    .get("time_range")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let safesearch = args
+                    .get("safesearch")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|n| {
+                        if (0..=2).contains(&n) {
+                            Some(n as u8)
+                        } else {
+                            None
+                        }
+                    });
+                let pageno = args
+                    .get("pageno")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
+
+                let max_results = args
+                    .get("max_results")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(10);
+                let overrides = crate::search::SearchParamOverrides {
+                    engines,
+                    categories,
+                    language,
+                    safesearch,
+                    time_range,
+                    pageno,
+                };
 
                 match search::search_web_with_params(&self.state, query, Some(overrides)).await {
                     Ok((results, extras)) => {
                         let content_text = if results.is_empty() {
-                            let mut text = format!("No search results found for query: '{}'\n\n", query);
-                            
+                            let mut text =
+                                format!("No search results found for query: '{}'\n\n", query);
+
                             // Show suggestions/corrections to help user refine query
                             if !extras.suggestions.is_empty() {
-                                text.push_str(&format!("**Suggestions:** {}\n", extras.suggestions.join(", ")));
+                                text.push_str(&format!(
+                                    "**Suggestions:** {}\n",
+                                    extras.suggestions.join(", ")
+                                ));
                             }
                             if !extras.corrections.is_empty() {
-                                text.push_str(&format!("**Did you mean:** {}\n", extras.corrections.join(", ")));
+                                text.push_str(&format!(
+                                    "**Did you mean:** {}\n",
+                                    extras.corrections.join(", ")
+                                ));
                             }
                             if !extras.unresponsive_engines.is_empty() {
                                 text.push_str(&format!("\n**Note:** {} search engine(s) did not respond. Try different engines or retry.\n", extras.unresponsive_engines.len()));
@@ -771,33 +892,44 @@ impl rmcp::ServerHandler for McpService {
                             let limited_results = results.iter().take(max_results);
                             let result_count = results.len();
                             let _showing = result_count.min(max_results);
-                            
+
                             let mut text = String::new();
-                            
+
                             // Phase 2: Show duplicate warning if present
                             if let Some(dup_warning) = &extras.duplicate_warning {
                                 text.push_str(&format!("{}\n\n", dup_warning));
                             }
-                            
+
                             // Phase 2: Show query rewrite info if query was enhanced
                             if let Some(ref rewrite) = extras.query_rewrite {
                                 if rewrite.was_rewritten() {
-                                    text.push_str(&format!("🔍 **Query Enhanced:** '{}' → '{}'\n\n", rewrite.original, rewrite.best_query()));
-                                } else if rewrite.is_developer_query && !rewrite.suggestions.is_empty() {
+                                    text.push_str(&format!(
+                                        "🔍 **Query Enhanced:** '{}' → '{}'\n\n",
+                                        rewrite.original,
+                                        rewrite.best_query()
+                                    ));
+                                } else if rewrite.is_developer_query
+                                    && !rewrite.suggestions.is_empty()
+                                {
                                     text.push_str("💡 **Query Optimization Tips:**\n");
-                                    for (i, suggestion) in rewrite.suggestions.iter().take(2).enumerate() {
+                                    for (i, suggestion) in
+                                        rewrite.suggestions.iter().take(2).enumerate()
+                                    {
                                         text.push_str(&format!("   {}. {}\n", i + 1, suggestion));
                                     }
                                     text.push('\n');
                                 }
                             }
-                            
-                            text.push_str(&format!("Found {} search results for '{}':", result_count, query));
+
+                            text.push_str(&format!(
+                                "Found {} search results for '{}':",
+                                result_count, query
+                            ));
                             if result_count > max_results {
                                 text.push_str(&format!(" (showing top {})\n", max_results));
                             }
                             text.push_str("\n\n");
-                            
+
                             // Show instant answers first if available
                             if !extras.answers.is_empty() {
                                 text.push_str("**Instant Answers:**\n");
@@ -805,7 +937,7 @@ impl rmcp::ServerHandler for McpService {
                                     text.push_str(&format!("📌 {}\n\n", answer));
                                 }
                             }
-                            
+
                             // Show search results
                             for (i, result) in limited_results.enumerate() {
                                 text.push_str(&format!(
@@ -816,60 +948,77 @@ impl rmcp::ServerHandler for McpService {
                                     result.content.chars().take(200).collect::<String>()
                                 ));
                             }
-                            
+
                             // Show helpful metadata at the end
                             if !extras.suggestions.is_empty() {
-                                text.push_str(&format!("\n**Related searches:** {}\n", extras.suggestions.join(", ")));
+                                text.push_str(&format!(
+                                    "\n**Related searches:** {}\n",
+                                    extras.suggestions.join(", ")
+                                ));
                             }
                             if !extras.unresponsive_engines.is_empty() {
                                 text.push_str(&format!("\n⚠️ **Note:** {} engine(s) did not respond (may affect completeness)\n", extras.unresponsive_engines.len()));
                             }
-                            
+
                             text
                         };
-                        
+
                         Ok(CallToolResult::success(vec![Content::text(content_text)]))
                     }
                     Err(e) => {
                         error!("Search tool error: {}", e);
-                        Ok(CallToolResult::success(vec![Content::text(format!("Search failed: {}", e))]))
+                        Ok(Self::tool_error_result(
+                            "SEARCH_FAILED",
+                            e.to_string(),
+                            false,
+                            None,
+                        ))
                     }
                 }
             }
             "scrape_url" => {
-                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
-                    ErrorCode::INVALID_PARAMS,
-                    "Missing required arguments object",
-                    None,
-                ))?;
-                let url = args
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| ErrorData::new(
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required arguments object",
+                        None,
+                    )
+                })?;
+                let url = args.get("url").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ErrorData::new(
                         ErrorCode::INVALID_PARAMS,
                         "Missing required parameter: url",
                         None,
-                    ))?;
-                
+                    )
+                })?;
+
                 self.state.scrape_cache.invalidate(url).await;
-                
+
                 match scrape::scrape_url(&self.state, url).await {
                     Ok(mut content) => {
-                        info!("Scraped content: {} words, {} chars clean_content, score: {:?}", 
-                              content.word_count, content.clean_content.len(), content.extraction_score);
-                        
+                        info!(
+                            "Scraped content: {} words, {} chars clean_content, score: {:?}",
+                            content.word_count,
+                            content.clean_content.len(),
+                            content.extraction_score
+                        );
+
                         let max_chars = args
                             .get("max_chars")
                             .and_then(|v| v.as_u64())
                             .map(|n| n as usize)
-                            .or_else(|| std::env::var("MAX_CONTENT_CHARS").ok().and_then(|s| s.parse().ok()))
+                            .or_else(|| {
+                                std::env::var("MAX_CONTENT_CHARS")
+                                    .ok()
+                                    .and_then(|s| s.parse().ok())
+                            })
                             .unwrap_or(10000);
-                        
+
                         // Set truncation metadata (Priority 1)
                         content.actual_chars = content.clean_content.len();
                         content.max_chars_limit = Some(max_chars);
                         content.truncated = content.clean_content.len() > max_chars;
-                        
+
                         if content.truncated {
                             content.warnings.push("content_truncated".to_string());
                         }
@@ -879,20 +1028,22 @@ impl rmcp::ServerHandler for McpService {
                         if content.extraction_score.map(|s| s < 0.4).unwrap_or(false) {
                             content.warnings.push("low_extraction_score".to_string());
                         }
-                        
+
                         // Check for output_format parameter (Priority 1)
                         let output_format = args
                             .get("output_format")
                             .and_then(|v| v.as_str())
                             .unwrap_or("text");
-                        
+
                         if output_format == "json" {
                             // Return JSON format
-                            let json_str = serde_json::to_string_pretty(&content)
-                                .unwrap_or_else(|e| format!(r#"{{"error": "Failed to serialize: {}"}}"#, e));
+                            let json_str =
+                                serde_json::to_string_pretty(&content).unwrap_or_else(|e| {
+                                    format!(r#"{{"error": "Failed to serialize: {}"}}"#, e)
+                                });
                             return Ok(CallToolResult::success(vec![Content::text(json_str)]));
                         }
-                        
+
                         // Otherwise return formatted text (backward compatible)
                         let content_preview = if content.clean_content.is_empty() {
                             let msg = "[No content extracted]\n\n**Possible reasons:**\n\
@@ -906,7 +1057,11 @@ impl rmcp::ServerHandler for McpService {
                                 content.clean_content.chars().take(max_chars).collect::<String>(),
                                 content.word_count)
                         } else {
-                            let preview = content.clean_content.chars().take(max_chars).collect::<String>();
+                            let preview = content
+                                .clean_content
+                                .chars()
+                                .take(max_chars)
+                                .collect::<String>();
                             if content.clean_content.len() > max_chars {
                                 format!("{}\n\n[Content truncated: {}/{} chars shown. Increase max_chars parameter to see more]",
                                     preview, max_chars, content.clean_content.len())
@@ -914,7 +1069,7 @@ impl rmcp::ServerHandler for McpService {
                                 preview
                             }
                         };
-                        
+
                         // Build Sources section from links
                         let sources_section = if content.links.is_empty() {
                             String::new()
@@ -925,23 +1080,33 @@ impl rmcp::ServerHandler for McpService {
                                 .get("max_links")
                                 .and_then(|v| v.as_u64())
                                 .map(|n| n as usize)
-                                .or_else(|| std::env::var("MAX_LINKS").ok().and_then(|s| s.parse().ok()))
+                                .or_else(|| {
+                                    std::env::var("MAX_LINKS").ok().and_then(|s| s.parse().ok())
+                                })
                                 .unwrap_or(100);
                             let link_count = content.links.len();
                             for (i, link) in content.links.iter().take(max_sources).enumerate() {
                                 if !link.text.is_empty() {
-                                    sources.push_str(&format!("[{}]: {} ({})", i + 1, link.url, link.text));
+                                    sources.push_str(&format!(
+                                        "[{}]: {} ({})",
+                                        i + 1,
+                                        link.url,
+                                        link.text
+                                    ));
                                 } else {
                                     sources.push_str(&format!("[{}]: {}", i + 1, link.url));
                                 }
                                 sources.push('\n');
                             }
                             if link_count > max_sources {
-                                sources.push_str(&format!("\n(Showing {} of {} total links)\n", max_sources, link_count));
+                                sources.push_str(&format!(
+                                    "\n(Showing {} of {} total links)\n",
+                                    max_sources, link_count
+                                ));
                             }
                             sources
                         };
-                        
+
                         let content_text = format!(
                             "**{}**\n\nURL: {}\nWord Count: {}\nLanguage: {}\n\n**Content:**\n{}\n\n**Metadata:**\n- Description: {}\n- Keywords: {}\n\n**Headings:**\n{}\n\n**Links Found:** {}\n**Images Found:** {}{}",
                             content.title,
@@ -959,12 +1124,17 @@ impl rmcp::ServerHandler for McpService {
                             content.images.len(),
                             sources_section
                         );
-                        
+
                         Ok(CallToolResult::success(vec![Content::text(content_text)]))
                     }
                     Err(e) => {
                         error!("Scrape tool error: {}", e);
-                        Ok(CallToolResult::success(vec![Content::text(format!("Scraping failed: {}", e))]))
+                        Ok(Self::tool_error_result(
+                            "SCRAPE_FAILED",
+                            e.to_string(),
+                            false,
+                            None,
+                        ))
                     }
                 }
             }
@@ -979,41 +1149,57 @@ impl rmcp::ServerHandler for McpService {
                     }
                 };
 
-                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
-                    ErrorCode::INVALID_PARAMS,
-                    "Missing required arguments object",
-                    None,
-                ))?;
-                
-                let query = args
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| ErrorData::new(
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required arguments object",
+                        None,
+                    )
+                })?;
+
+                let query = args.get("query").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ErrorData::new(
                         ErrorCode::INVALID_PARAMS,
                         "Missing required parameter: query",
                         None,
-                    ))?;
-                
-                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(10);
-                let threshold = args.get("threshold").and_then(|v| v.as_f64()).unwrap_or(0.7) as f32;
-                
-                // Parse entry_type filter if provided
-                let entry_type_filter = args.get("entry_type")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| match s.to_lowercase().as_str() {
-                        "search" => Some(crate::history::EntryType::Search),
-                        "scrape" => Some(crate::history::EntryType::Scrape),
-                        _ => None
-                    });
+                    )
+                })?;
 
-                match memory.search_history(query, limit, threshold, entry_type_filter).await {
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(10);
+                let threshold = args
+                    .get("threshold")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.7) as f32;
+
+                // Parse entry_type filter if provided
+                let entry_type_filter =
+                    args.get("entry_type")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| match s.to_lowercase().as_str() {
+                            "search" => Some(crate::history::EntryType::Search),
+                            "scrape" => Some(crate::history::EntryType::Scrape),
+                            _ => None,
+                        });
+
+                match memory
+                    .search_history(query, limit, threshold, entry_type_filter)
+                    .await
+                {
                     Ok(results) => {
                         if results.is_empty() {
                             let text = format!("No relevant history found for: '{}'\n\nTry:\n- Lower threshold (currently {:.2})\n- Broader search terms\n- Check if you have any saved history", query, threshold);
                             Ok(CallToolResult::success(vec![Content::text(text)]))
                         } else {
-                            let mut text = format!("Found {} relevant entries for '{}':\n\n", results.len(), query);
-                            
+                            let mut text = format!(
+                                "Found {} relevant entries for '{}':\n\n",
+                                results.len(),
+                                query
+                            );
+
                             for (i, (entry, score)) in results.iter().enumerate() {
                                 text.push_str(&format!(
                                     "{}. [Similarity: {:.3}] **{}** ({})\n   Type: {:?}\n   When: {}\n   Summary: {}\n",
@@ -1025,57 +1211,85 @@ impl rmcp::ServerHandler for McpService {
                                     entry.timestamp.format("%Y-%m-%d %H:%M UTC"),
                                     entry.summary.chars().take(150).collect::<String>()
                                 ));
-                                
+
                                 // query field is always a String, show it
                                 text.push_str(&format!("   Query: {}\n", entry.query));
-                                
+
                                 text.push('\n');
                             }
-                            
+
                             text.push_str(&format!("\n💡 Tip: Use threshold={:.2} for similar results, or higher (0.8-0.9) for more specific matches", threshold));
-                            
+
                             Ok(CallToolResult::success(vec![Content::text(text)]))
                         }
                     }
                     Err(e) => {
                         error!("History search error: {}", e);
-                        Ok(CallToolResult::success(vec![Content::text(format!("History search failed: {}", e))]))
+                        Ok(Self::tool_error_result(
+                            "HISTORY_SEARCH_FAILED",
+                            e.to_string(),
+                            false,
+                            None,
+                        ))
                     }
                 }
             }
             "scrape_batch" => {
-                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
-                    ErrorCode::INVALID_PARAMS,
-                    "Missing required arguments object",
-                    None,
-                ))?;
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required arguments object",
+                        None,
+                    )
+                })?;
 
                 // Parse URLs array
                 let urls: Vec<String> = args
                     .get("urls")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-                    .ok_or_else(|| ErrorData::new(
-                        ErrorCode::INVALID_PARAMS,
-                        "Missing required parameter: urls (array of strings)",
-                        None,
-                    ))?;
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .ok_or_else(|| {
+                        ErrorData::new(
+                            ErrorCode::INVALID_PARAMS,
+                            "Missing required parameter: urls (array of strings)",
+                            None,
+                        )
+                    })?;
 
                 if urls.is_empty() {
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        "Error: urls array cannot be empty".to_string()
-                    )]));
+                    return Ok(Self::tool_error_result(
+                        "INVALID_PARAMS",
+                        "urls array cannot be empty".to_string(),
+                        false,
+                        None,
+                    ));
                 }
 
                 if urls.len() > 100 {
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        format!("Error: Maximum 100 URLs per request, got {}", urls.len())
-                    )]));
+                    return Ok(Self::tool_error_result(
+                        "INVALID_PARAMS",
+                        format!("Maximum 100 URLs per request, got {}", urls.len()),
+                        false,
+                        None,
+                    ));
                 }
 
-                let max_concurrent = args.get("max_concurrent").and_then(|v| v.as_u64()).map(|n| n as usize);
-                let max_chars = args.get("max_chars").and_then(|v| v.as_u64()).map(|n| n as usize);
-                let output_format = args.get("output_format").and_then(|v| v.as_str()).unwrap_or("json");
+                let max_concurrent = args
+                    .get("max_concurrent")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize);
+                let max_chars = args
+                    .get("max_chars")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize);
+                let output_format = args
+                    .get("output_format")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("json");
 
                 info!("Batch scraping {} URLs", urls.len());
 
@@ -1083,8 +1297,10 @@ impl rmcp::ServerHandler for McpService {
                     Ok(response) => {
                         if output_format == "json" {
                             // Return JSON format
-                            let json_str = serde_json::to_string_pretty(&response)
-                                .unwrap_or_else(|e| format!(r#"{{"error": "Failed to serialize: {}"}}"#, e));
+                            let json_str =
+                                serde_json::to_string_pretty(&response).unwrap_or_else(|e| {
+                                    format!(r#"{{"error": "Failed to serialize: {}"}}"#, e)
+                                });
                             Ok(CallToolResult::success(vec![Content::text(json_str)]))
                         } else {
                             // Return text format summary
@@ -1121,52 +1337,87 @@ impl rmcp::ServerHandler for McpService {
                     }
                     Err(e) => {
                         error!("Batch scrape error: {}", e);
-                        Ok(CallToolResult::success(vec![Content::text(format!("Batch scrape failed: {}", e))]))
+                        Ok(Self::tool_error_result(
+                            "BATCH_SCRAPE_FAILED",
+                            e.to_string(),
+                            false,
+                            None,
+                        ))
                     }
                 }
             }
             "crawl_website" => {
-                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
-                    ErrorCode::INVALID_PARAMS,
-                    "Missing required arguments object",
-                    None,
-                ))?;
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required arguments object",
+                        None,
+                    )
+                })?;
 
-                let url = args
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| ErrorData::new(
+                let url = args.get("url").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ErrorData::new(
                         ErrorCode::INVALID_PARAMS,
                         "Missing required parameter: url",
                         None,
-                    ))?;
+                    )
+                })?;
 
                 // Parse configuration from args
-                let max_depth = args.get("max_depth").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(3);
-                let max_pages = args.get("max_pages").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(50);
-                let max_concurrent = args.get("max_concurrent").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(5);
-                let same_domain_only = args.get("same_domain_only").and_then(|v| v.as_bool()).unwrap_or(true);
-                let max_chars_per_page = args.get("max_chars_per_page").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(5000);
+                let max_depth = args
+                    .get("max_depth")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(3);
+                let max_pages = args
+                    .get("max_pages")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(50);
+                let max_concurrent = args
+                    .get("max_concurrent")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(5);
+                let same_domain_only = args
+                    .get("same_domain_only")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let max_chars_per_page = args
+                    .get("max_chars_per_page")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(5000);
 
                 let include_patterns: Vec<String> = args
                     .get("include_patterns")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 let exclude_patterns: Vec<String> = args
                     .get("exclude_patterns")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 // Build config with defaults + user overrides
-                let mut config = crawl::CrawlConfig::default();
-                config.max_depth = max_depth.min(10);
-                config.max_pages = max_pages.min(500);
-                config.max_concurrent = max_concurrent.min(20);
-                config.same_domain_only = same_domain_only;
-                config.max_chars_per_page = max_chars_per_page;
+                let mut config = crawl::CrawlConfig {
+                    max_depth: max_depth.min(10),
+                    max_pages: max_pages.min(500),
+                    max_concurrent: max_concurrent.min(20),
+                    same_domain_only,
+                    max_chars_per_page,
+                    ..crawl::CrawlConfig::default()
+                };
 
                 if !include_patterns.is_empty() {
                     config.include_patterns = include_patterns;
@@ -1180,7 +1431,10 @@ impl rmcp::ServerHandler for McpService {
                     }
                 }
 
-                info!("Starting crawl of {} (depth: {}, max_pages: {})", url, config.max_depth, config.max_pages);
+                info!(
+                    "Starting crawl of {} (depth: {}, max_pages: {})",
+                    url, config.max_depth, config.max_pages
+                );
 
                 match crawl::crawl_website(&self.state, url, config).await {
                     Ok(response) => {
@@ -1217,7 +1471,10 @@ impl rmcp::ServerHandler for McpService {
                                 ));
                                 if let Some(preview) = &result.content_preview {
                                     let short_preview: String = preview.chars().take(200).collect();
-                                    text.push_str(&format!("   Preview: {}...\n", short_preview.replace('\n', " ")));
+                                    text.push_str(&format!(
+                                        "   Preview: {}...\n",
+                                        short_preview.replace('\n', " ")
+                                    ));
                                 }
                                 text.push('\n');
                             } else {
@@ -1234,12 +1491,18 @@ impl rmcp::ServerHandler for McpService {
                         // Add sitemap
                         if let Some(sitemap) = &response.sitemap {
                             if !sitemap.is_empty() {
-                                text.push_str(&format!("\n**🗺️ Sitemap ({} URLs):**\n", sitemap.len()));
+                                text.push_str(&format!(
+                                    "\n**🗺️ Sitemap ({} URLs):**\n",
+                                    sitemap.len()
+                                ));
                                 for url in sitemap.iter().take(50) {
                                     text.push_str(&format!("• {}\n", url));
                                 }
                                 if sitemap.len() > 50 {
-                                    text.push_str(&format!("... and {} more URLs\n", sitemap.len() - 50));
+                                    text.push_str(&format!(
+                                        "... and {} more URLs\n",
+                                        sitemap.len() - 50
+                                    ));
                                 }
                             }
                         }
@@ -1248,48 +1511,67 @@ impl rmcp::ServerHandler for McpService {
                     }
                     Err(e) => {
                         error!("Crawl error: {}", e);
-                        Ok(CallToolResult::success(vec![Content::text(format!("Crawl failed: {}", e))]))
+                        Ok(Self::tool_error_result(
+                            "CRAWL_FAILED",
+                            e.to_string(),
+                            false,
+                            None,
+                        ))
                     }
                 }
             }
             "extract_structured" => {
-                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
-                    ErrorCode::INVALID_PARAMS,
-                    "Missing required arguments object",
-                    None,
-                ))?;
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required arguments object",
+                        None,
+                    )
+                })?;
 
-                let url = args
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| ErrorData::new(
+                let url = args.get("url").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ErrorData::new(
                         ErrorCode::INVALID_PARAMS,
                         "Missing required parameter: url",
                         None,
-                    ))?;
+                    )
+                })?;
 
                 // Parse schema if provided
-                let schema: Option<Vec<crate::types::ExtractField>> = args
-                    .get("schema")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
+                let schema: Option<Vec<crate::types::ExtractField>> =
+                    args.get("schema").and_then(|v| v.as_array()).map(|arr| {
                         arr.iter()
                             .filter_map(|item| {
                                 let name = item.get("name")?.as_str()?.to_string();
                                 let description = item.get("description")?.as_str()?.to_string();
-                                let field_type = item.get("field_type").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                let field_type = item
+                                    .get("field_type")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
                                 let required = item.get("required").and_then(|v| v.as_bool());
-                                Some(crate::types::ExtractField { name, description, field_type, required })
+                                Some(crate::types::ExtractField {
+                                    name,
+                                    description,
+                                    field_type,
+                                    required,
+                                })
                             })
                             .collect()
                     });
 
-                let prompt = args.get("prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let max_chars = args.get("max_chars").and_then(|v| v.as_u64()).map(|n| n as usize);
+                let prompt = args
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let max_chars = args
+                    .get("max_chars")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize);
 
                 info!("Extracting structured data from: {}", url);
 
-                match extract::extract_structured(&self.state, url, schema, prompt, max_chars).await {
+                match extract::extract_structured(&self.state, url, schema, prompt, max_chars).await
+                {
                     Ok(response) => {
                         let mut text = format!(
                             "**Structured Extraction Results**\n\n\
@@ -1309,7 +1591,10 @@ impl rmcp::ServerHandler for McpService {
                         );
 
                         if !response.warnings.is_empty() {
-                            text.push_str(&format!("⚠️ **Warnings:** {}\n\n", response.warnings.join(", ")));
+                            text.push_str(&format!(
+                                "⚠️ **Warnings:** {}\n\n",
+                                response.warnings.join(", ")
+                            ));
                         }
 
                         // Format extracted data as JSON
@@ -1321,7 +1606,8 @@ impl rmcp::ServerHandler for McpService {
 
                         // Raw content preview
                         text.push_str("**📄 Raw Content Preview:**\n");
-                        let preview: String = response.raw_content_preview.chars().take(1000).collect();
+                        let preview: String =
+                            response.raw_content_preview.chars().take(1000).collect();
                         text.push_str(&preview);
                         if response.raw_content_preview.len() > 1000 {
                             text.push_str("...\n[truncated]");
@@ -1331,45 +1617,95 @@ impl rmcp::ServerHandler for McpService {
                     }
                     Err(e) => {
                         error!("Extract error: {}", e);
-                        Ok(CallToolResult::success(vec![Content::text(format!("Extraction failed: {}", e))]))
+                        // Map known LLM error codes to typed envelope for the caller.
+                        let err_str = e.to_string();
+                        let (code, retryable) =
+                            if err_str.contains(crate::llm_client::LLM_NOT_CONFIGURED) {
+                                (crate::llm_client::LLM_NOT_CONFIGURED, false)
+                            } else if err_str.contains(crate::llm_client::LLM_AUTH_FAILED) {
+                                (crate::llm_client::LLM_AUTH_FAILED, false)
+                            } else if err_str.contains(crate::llm_client::LLM_RATE_LIMITED) {
+                                (crate::llm_client::LLM_RATE_LIMITED, true)
+                            } else if err_str.contains(crate::llm_client::LLM_TIMEOUT) {
+                                (crate::llm_client::LLM_TIMEOUT, true)
+                            } else if err_str.contains(crate::llm_client::LLM_INVALID_JSON) {
+                                (crate::llm_client::LLM_INVALID_JSON, false)
+                            } else {
+                                ("EXTRACT_FAILED", false)
+                            };
+                        Ok(Self::tool_error_result(code, err_str, retryable, None))
                     }
                 }
             }
             "deep_research" => {
-                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
-                    ErrorCode::INVALID_PARAMS,
-                    "Missing required arguments object",
-                    None,
-                ))?;
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required arguments object",
+                        None,
+                    )
+                })?;
 
-                let query = args
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| ErrorData::new(
+                let query = args.get("query").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ErrorData::new(
                         ErrorCode::INVALID_PARAMS,
                         "Missing required parameter: query",
                         None,
-                    ))?;
+                    )
+                })?;
 
                 // Parse configuration
-                let max_search_results = args.get("max_search_results").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(10);
-                let max_pages_per_site = args.get("max_pages_per_site").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(5);
-                let max_total_pages = args.get("max_total_pages").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(30);
-                let crawl_depth = args.get("crawl_depth").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(2);
-                let search_engines = args.get("search_engines").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let time_range = args.get("time_range").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let language = args.get("language").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let max_search_results = args
+                    .get("max_search_results")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(10);
+                let max_pages_per_site = args
+                    .get("max_pages_per_site")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(5);
+                let max_total_pages = args
+                    .get("max_total_pages")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(30);
+                let crawl_depth = args
+                    .get("crawl_depth")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(2);
+                let search_engines = args
+                    .get("search_engines")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let time_range = args
+                    .get("time_range")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let language = args
+                    .get("language")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
 
                 let include_domains: Vec<String> = args
                     .get("include_domains")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 let exclude_domains: Vec<String> = args
                     .get("exclude_domains")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 let config = research::DeepResearchConfig {
@@ -1413,7 +1749,10 @@ impl rmcp::ServerHandler for McpService {
 
                         // Warnings
                         if !response.warnings.is_empty() {
-                            text.push_str(&format!("⚠️ **Warnings:** {}\n\n", response.warnings.join(", ")));
+                            text.push_str(&format!(
+                                "⚠️ **Warnings:** {}\n\n",
+                                response.warnings.join(", ")
+                            ));
                         }
 
                         // Summary
@@ -1444,7 +1783,9 @@ impl rmcp::ServerHandler for McpService {
                             for topic in response.topics.iter().take(8) {
                                 text.push_str(&format!(
                                     "• **{}** (mentioned {} times across {} sources)\n",
-                                    topic.topic, topic.mentions, topic.sources.len()
+                                    topic.topic,
+                                    topic.mentions,
+                                    topic.sources.len()
                                 ));
                             }
                             text.push('\n');
@@ -1467,17 +1808,27 @@ impl rmcp::ServerHandler for McpService {
 
                             // Show top headings
                             if !source.headings.is_empty() {
-                                let headings_preview: String = source.headings.iter().take(3).cloned().collect::<Vec<_>>().join(" | ");
+                                let headings_preview: String = source
+                                    .headings
+                                    .iter()
+                                    .take(3)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join(" | ");
                                 text.push_str(&format!("   📑 {}\n", headings_preview));
                             }
 
                             // Content preview
-                            let preview: String = source.content_preview.chars().take(150).collect();
+                            let preview: String =
+                                source.content_preview.chars().take(150).collect();
                             text.push_str(&format!("   {}\n\n", preview.replace('\n', " ")));
                         }
 
                         if response.sources.len() > 15 {
-                            text.push_str(&format!("... and {} more sources\n\n", response.sources.len() - 15));
+                            text.push_str(&format!(
+                                "... and {} more sources\n\n",
+                                response.sources.len() - 15
+                            ));
                         }
 
                         // Related Queries
@@ -1498,58 +1849,76 @@ impl rmcp::ServerHandler for McpService {
                     }
                     Err(e) => {
                         error!("Deep research error: {}", e);
-                        Ok(CallToolResult::success(vec![Content::text(format!(
-                            "Deep research failed: {}\n\n\
-                            **Suggestions:**\n\
-                            • Try a more specific query\n\
-                            • Check if SearXNG is running\n\
-                            • Reduce max_search_results or max_total_pages\n\
-                            • Try different search_engines",
-                            e
-                        ))]))
+                        Ok(Self::tool_error_result(
+                            "DEEP_RESEARCH_FAILED",
+                            e.to_string(),
+                            false,
+                            None,
+                        ))
                     }
                 }
             }
             "crawl_start" => {
-                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
-                    ErrorCode::INVALID_PARAMS,
-                    "Missing required arguments object",
-                    None,
-                ))?;
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required arguments object",
+                        None,
+                    )
+                })?;
                 let json_text = self.handle_crawl_start(args).await;
                 Ok(CallToolResult::success(vec![Content::text(json_text)]))
             }
             "crawl_status" => {
-                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
-                    ErrorCode::INVALID_PARAMS,
-                    "Missing required arguments object",
-                    None,
-                ))?;
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required arguments object",
+                        None,
+                    )
+                })?;
                 let json_text = self.handle_crawl_status(args).await;
                 Ok(CallToolResult::success(vec![Content::text(json_text)]))
             }
             "map_website" => {
-                let args = request.arguments.as_ref().ok_or_else(|| ErrorData::new(
-                    ErrorCode::INVALID_PARAMS,
-                    "Missing required arguments object",
-                    None,
-                ))?;
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        "Missing required arguments object",
+                        None,
+                    )
+                })?;
 
-                let url = args
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| ErrorData::new(
+                let url = args.get("url").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ErrorData::new(
                         ErrorCode::INVALID_PARAMS,
                         "Missing required parameter: url",
                         None,
-                    ))?;
+                    )
+                })?;
 
-                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(100);
-                let search_filter = args.get("search").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let include_subdomains = args.get("include_subdomains").and_then(|v| v.as_bool()).unwrap_or(true);
-                let sitemap_mode = args.get("sitemap_mode").and_then(|v| v.as_str()).unwrap_or("crawl");
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(100);
+                let search_filter = args
+                    .get("search")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let include_subdomains = args
+                    .get("include_subdomains")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let sitemap_mode = args
+                    .get("sitemap_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("crawl");
 
-                info!("Mapping website: {} (limit: {}, mode: {})", url, limit, sitemap_mode);
+                info!(
+                    "Mapping website: {} (limit: {}, mode: {})",
+                    url, limit, sitemap_mode
+                );
 
                 let start_time = std::time::Instant::now();
 
@@ -1565,7 +1934,8 @@ impl rmcp::ServerHandler for McpService {
                 match crawl::crawl_website(&self.state, url, config).await {
                     Ok(response) => {
                         // Extract URLs from crawl results
-                        let mut discovered_urls: Vec<String> = response.results
+                        let mut discovered_urls: Vec<String> = response
+                            .results
                             .iter()
                             .filter(|r| r.success)
                             .map(|r| r.url.clone())
@@ -1577,7 +1947,9 @@ impl rmcp::ServerHandler for McpService {
                                 discovered_urls.retain(|u| {
                                     url::Url::parse(u)
                                         .ok()
-                                        .and_then(|parsed| parsed.host_str().map(|h| h.to_lowercase() == *base))
+                                        .and_then(|parsed| {
+                                            parsed.host_str().map(|h| h.to_lowercase() == *base)
+                                        })
                                         .unwrap_or(false)
                                 });
                             }
@@ -1605,13 +1977,20 @@ impl rmcp::ServerHandler for McpService {
                             duration_ms: start_time.elapsed().as_millis() as u64,
                         };
 
-                        let json_str = serde_json::to_string_pretty(&map_response)
-                            .unwrap_or_else(|e| format!(r#"{{"error": "Failed to serialize: {}"}}"#, e));
+                        let json_str =
+                            serde_json::to_string_pretty(&map_response).unwrap_or_else(|e| {
+                                format!(r#"{{"error": "Failed to serialize: {}"}}"#, e)
+                            });
                         Ok(CallToolResult::success(vec![Content::text(json_str)]))
                     }
                     Err(e) => {
                         error!("Map website error: {}", e);
-                        Ok(CallToolResult::success(vec![Content::text(format!("Website mapping failed: {}", e))]))
+                        Ok(Self::tool_error_result(
+                            "MAP_WEBSITE_FAILED",
+                            e.to_string(),
+                            false,
+                            None,
+                        ))
                     }
                 }
             }
@@ -1670,7 +2049,9 @@ mod tests {
 
         // Check that schema contains expected properties
         let schema_value = serde_json::Value::Object(map_tool.input_schema.as_ref().clone());
-        let props = schema_value.get("properties").expect("should have properties");
+        let props = schema_value
+            .get("properties")
+            .expect("should have properties");
         assert!(props.get("url").is_some(), "should have 'url' field");
         assert!(props.get("limit").is_some(), "should have 'limit' field");
         assert!(props.get("search").is_some(), "should have 'search' field");
@@ -1761,11 +2142,9 @@ mod tests {
         let args = serde_json::json!({
             "url": "https://example.com"
         });
-        let json_text = svc
-            .handle_crawl_start(args.as_object().unwrap())
-            .await;
-        let parsed: serde_json::Value = serde_json::from_str(&json_text)
-            .expect("crawl_start output should be valid JSON");
+        let json_text = svc.handle_crawl_start(args.as_object().unwrap()).await;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_text).expect("crawl_start output should be valid JSON");
         assert!(
             parsed.get("job_id").is_some(),
             "crawl_start response must contain job_id, got: {}",
@@ -1784,11 +2163,9 @@ mod tests {
         let args = serde_json::json!({
             "job_id": "nonexistent-job-id-12345"
         });
-        let json_text = svc
-            .handle_crawl_status(args.as_object().unwrap())
-            .await;
-        let parsed: serde_json::Value = serde_json::from_str(&json_text)
-            .expect("crawl_status output should be valid JSON");
+        let json_text = svc.handle_crawl_status(args.as_object().unwrap()).await;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_text).expect("crawl_status output should be valid JSON");
         assert_eq!(
             parsed.get("code").and_then(|v| v.as_str()),
             Some("JOB_NOT_FOUND"),
@@ -1807,9 +2184,7 @@ mod tests {
         let svc = test_service();
         // An obviously invalid URL (no scheme, no host) should be rejected before any job is created
         let args = serde_json::json!({ "url": "not a url at all" });
-        let json_text = svc
-            .handle_crawl_start(args.as_object().unwrap())
-            .await;
+        let json_text = svc.handle_crawl_start(args.as_object().unwrap()).await;
         let parsed: serde_json::Value = serde_json::from_str(&json_text)
             .expect("handle_crawl_start output should be valid JSON");
         assert_eq!(
@@ -1835,9 +2210,7 @@ mod tests {
         let svc = test_service();
         // ftp:// URL parses but must be rejected because only http/https are supported
         let args = serde_json::json!({ "url": "ftp://example.com/files" });
-        let json_text = svc
-            .handle_crawl_start(args.as_object().unwrap())
-            .await;
+        let json_text = svc.handle_crawl_start(args.as_object().unwrap()).await;
         let parsed: serde_json::Value = serde_json::from_str(&json_text)
             .expect("handle_crawl_start output should be valid JSON");
         assert_eq!(
@@ -1856,6 +2229,55 @@ mod tests {
         assert!(
             parsed.get("job_id").is_none(),
             "no job_id should be returned for non-http URL"
+        );
+    }
+
+    #[test]
+    fn test_error_envelope_shape() {
+        // Ensure helper produces standardized envelope with required fields.
+        let envelope_json = McpService::tool_error_json(
+            "SEARCH_FAILED",
+            "Search failed: boom".to_string(),
+            false,
+            None,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&envelope_json).expect("error envelope must be valid JSON");
+
+        assert_eq!(
+            parsed.get("code").and_then(|v| v.as_str()),
+            Some("SEARCH_FAILED")
+        );
+        assert_eq!(
+            parsed.get("message").and_then(|v| v.as_str()),
+            Some("Search failed: boom")
+        );
+        assert_eq!(
+            parsed.get("retryable").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_error_envelope_redacts_secrets() {
+        let envelope_json = McpService::tool_error_json(
+            "AUTH_FAILED",
+            "api_key=sk-verysecretkey123456 token=abc123 Bearer xyz789".to_string(),
+            false,
+            None,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&envelope_json).expect("error envelope must be valid JSON");
+        let msg = parsed.get("message").and_then(|v| v.as_str()).unwrap_or("");
+
+        assert!(
+            !msg.contains("sk-verysecretkey123456"),
+            "OpenAI-like key should be redacted"
+        );
+        assert!(!msg.contains("token=abc123"), "token should be redacted");
+        assert!(
+            !msg.contains("Bearer xyz789"),
+            "bearer token should be redacted"
         );
     }
 }

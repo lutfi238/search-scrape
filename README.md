@@ -125,6 +125,12 @@ cd mcp-server && cargo build --release
 | `MAX_LINKS`           | `100`                    | Max links to return in Sources section                                                                                                            |
 | `MAX_CONTENT_CHARS`   | `10000`                  | Default `max_chars` limit for scraped content (100-50000)                                                                                         |
 | `RUST_LOG`            | -                        | Log level: `error`, `warn`, `info`, `debug`, `trace`                                                                                              |
+| `LLM_BASE_URL`        | -                        | **Optional**: OpenAI-compatible base URL for `extract_structured` (required only when using BYO LLM extraction)                                  |
+| `LLM_API_KEY`         | -                        | **Optional**: API key for `LLM_BASE_URL` (required only when using BYO LLM extraction)                                                           |
+| `LLM_MODEL`           | -                        | **Optional**: Model name for BYO LLM extraction (required only when using BYO LLM extraction)                                                    |
+| `LLM_TIMEOUT_MS`      | `60000`                  | Optional timeout override for BYO LLM extraction requests (milliseconds)                                                                          |
+| `LLM_MAX_TOKENS`      | -                        | Optional max token limit for BYO LLM extraction responses                                                                                          |
+| `LLM_TEMPERATURE`     | -                        | Optional sampling temperature for BYO LLM extraction                                                                                               |
 
 ### Docker Configuration Files
 
@@ -284,6 +290,96 @@ Set `output_format: "json"` to get structured data:
 - `truncated`: Boolean flag indicating if content was cut off
 - `warnings`: Array of issues (e.g., `["content_truncated"]`)
 - `domain`: Source domain for filtering/trust assessment
+
+### `extract_structured` - BYO LLM Structured Extraction
+
+Extract structured JSON from any webpage using your own OpenAI-compatible LLM provider.
+
+**Required env vars:** `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`
+
+```json
+{
+  "url": "https://example.com/product/123",
+  "schema": [
+    {"name": "name", "description": "Product name", "field_type": "string", "required": true},
+    {"name": "price", "description": "Product price", "field_type": "number", "required": true}
+  ],
+  "prompt": "Extract product fields as clean JSON",
+  "max_chars": 10000
+}
+```
+
+**Error envelope (standardized):**
+
+```json
+{
+  "code": "LLM_NOT_CONFIGURED",
+  "message": "LLM_NOT_CONFIGURED: ...",
+  "retryable": false
+}
+```
+
+Possible `code` values include `LLM_NOT_CONFIGURED`, `LLM_AUTH_FAILED`, `LLM_RATE_LIMITED`, `LLM_TIMEOUT`, `LLM_INVALID_JSON`, `EXTRACT_FAILED`.
+
+### `crawl_start` and `crawl_status` - Async Crawl Jobs
+
+Use `crawl_start` to queue a background crawl and `crawl_status` to poll progress/results.
+
+```json
+// crawl_start request
+{
+  "url": "https://example.com/docs",
+  "max_depth": 3,
+  "max_pages": 100
+}
+```
+
+```json
+// crawl_start response
+{
+  "job_id": "crawl-abc123",
+  "status": "running"
+}
+```
+
+```json
+// crawl_status request
+{
+  "job_id": "crawl-abc123",
+  "include_results": true,
+  "offset": 0,
+  "limit": 50
+}
+```
+
+```json
+// crawl_status response (example)
+{
+  "job_id": "crawl-abc123",
+  "status": "completed",
+  "pages_crawled": 42,
+  "pages_total": 42,
+  "results": []
+}
+```
+
+Jobs are retained for 24 hours. `crawl_status` returns `JOB_NOT_FOUND` when missing/expired.
+
+### `map_website` - URL Discovery Map
+
+Discover website URLs (sitemap-like) without full content extraction:
+
+```json
+{
+  "url": "https://example.com",
+  "limit": 200,
+  "search": "/docs/",
+  "include_subdomains": true,
+  "sitemap_mode": "crawl"
+}
+```
+
+Returns a deterministic URL list with `total_urls` and `duration_ms`.
 
 ### `research_history` - Semantic Search History (🆕 v3.0 | Enhanced v3.5)
 
